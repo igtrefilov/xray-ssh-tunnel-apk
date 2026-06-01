@@ -1,0 +1,25 @@
+# Gradle / Android build output
+.gradle/
+build/
+**/build/
+
+# Local SDK paths
+local.properties
+
+# Generated packages and screenshots
+*.apk
+*.aab
+autostart-*.png
+
+# SSH tunnel secrets. Keep these local only.
+keys/*
+!keys/README.md
+app/src/main/assets/phone_tunnel_key
+app/src/main/assets/*_key
+app/src/main/assets/*.pem
+app/src/main/assets/id_*
+
+# OS/editor noise
+.DS_Store
+*.swp
+*.swo
