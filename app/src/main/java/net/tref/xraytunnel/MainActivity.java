@@ -47,7 +47,8 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView config = new TextView(this);
-        config.setText("127.0.0.1:24443 -> 107.161.82.52:127.0.0.1:443");
+        config.setText("107: 127.0.0.1:24443 -> 107.161.82.52:127.0.0.1:443\n"
+                + "151: 127.0.0.1:34443 -> 151.245.140.102:127.0.0.1:443");
         config.setTextSize(14);
         config.setPadding(0, dp(12), 0, dp(20));
         root.addView(config, new LinearLayout.LayoutParams(

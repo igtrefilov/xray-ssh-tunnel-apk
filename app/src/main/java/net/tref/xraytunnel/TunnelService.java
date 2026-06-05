@@ -25,17 +25,28 @@ public final class TunnelService extends Service {
     public static final String KEY_STATUS = "status";
 
     private static final String CHANNEL_ID = "tunnel";
-    private static final String SSH_HOST = "107.161.82.52";
     private static final int SSH_PORT = 22;
     private static final String SSH_USER = "ilya";
     private static final String LOCAL_HOST = "127.0.0.1";
-    private static final int LOCAL_PORT = 24443;
     private static final String REMOTE_HOST = "127.0.0.1";
     private static final int REMOTE_PORT = 443;
+    private static final TunnelProfile[] PROFILES = new TunnelProfile[] {
+            new TunnelProfile(
+                    "107",
+                    "107.161.82.52",
+                    24443,
+                    new String[] {"phone_tunnel_107_ed25519_key", "phone_tunnel_key"}),
+            new TunnelProfile(
+                    "151",
+                    "151.245.140.102",
+                    34443,
+                    new String[] {"phone_tunnel_151_key", "phone_tunnel_151_ed25519_key"})
+    };
 
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final ExecutorService executor = Executors.newFixedThreadPool(PROFILES.length);
     private final AtomicBoolean running = new AtomicBoolean(false);
-    private volatile Session session;
+    private final Session[] sessions = new Session[PROFILES.length];
+    private final String[] statuses = new String[PROFILES.length];
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -67,30 +78,36 @@ public final class TunnelService extends Service {
         }
         createNotificationChannel();
         startForeground(1, notification("connecting"));
-        executor.execute(this::runLoop);
+        for (int i = 0; i < PROFILES.length; i++) {
+            final int profileIndex = i;
+            setProfileStatus(profileIndex, "connecting");
+            executor.execute(() -> runLoop(profileIndex));
+        }
     }
 
     private void stopTunnel() {
         running.set(false);
-        disconnect();
+        disconnectAll();
         updateStatus("stopped");
         stopForeground(true);
         stopSelf();
     }
 
-    private void runLoop() {
+    private void runLoop(int profileIndex) {
+        TunnelProfile profile = PROFILES[profileIndex];
         while (running.get()) {
             try {
-                updateStatus("connecting to " + SSH_HOST + ":" + SSH_PORT);
-                startForeground(1, notification("connecting"));
+                setProfileStatus(profileIndex, "connecting to " + profile.sshHost + ":" + SSH_PORT);
 
                 JSch jsch = new JSch();
-                jsch.addIdentity("phone_tunnel", readAsset("phone_tunnel_key"), null, null);
+                for (String keyAsset : profile.keyAssets) {
+                    jsch.addIdentity(profile.name + "-" + keyAsset, readAsset(keyAsset), null, null);
+                }
                 try (InputStream knownHosts = getAssets().open("known_hosts")) {
                     jsch.setKnownHosts(knownHosts);
                 }
 
-                Session nextSession = jsch.getSession(SSH_USER, SSH_HOST, SSH_PORT);
+                Session nextSession = jsch.getSession(SSH_USER, profile.sshHost, SSH_PORT);
                 nextSession.setSocketFactory(new UnderlyingNetworkSocketFactory(this));
                 Properties config = new Properties();
                 config.put("StrictHostKeyChecking", "yes");
@@ -99,12 +116,10 @@ public final class TunnelService extends Service {
                 nextSession.setServerAliveInterval(30000);
                 nextSession.setServerAliveCountMax(3);
                 nextSession.connect(15000);
-                nextSession.setPortForwardingL(LOCAL_HOST, LOCAL_PORT, REMOTE_HOST, REMOTE_PORT);
-                session = nextSession;
+                nextSession.setPortForwardingL(LOCAL_HOST, profile.localPort, REMOTE_HOST, REMOTE_PORT);
+                sessions[profileIndex] = nextSession;
 
-                String ready = "listening on " + LOCAL_HOST + ":" + LOCAL_PORT;
-                updateStatus(ready);
-                startForeground(1, notification(ready));
+                setProfileStatus(profileIndex, "listening on " + LOCAL_HOST + ":" + profile.localPort);
 
                 while (running.get() && nextSession.isConnected()) {
                     Thread.sleep(2000);
@@ -113,21 +128,24 @@ public final class TunnelService extends Service {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
-                updateStatus("error: " + cleanMessage(e));
-                startForeground(1, notification("error"));
+                setProfileStatus(profileIndex, "error: " + cleanMessage(e));
                 sleepBeforeRetry();
             } finally {
-                disconnect();
+                disconnect(profileIndex);
             }
         }
-        updateStatus("stopped");
-        stopForeground(true);
-        stopSelf();
+        setProfileStatus(profileIndex, "stopped");
     }
 
-    private void disconnect() {
-        Session current = session;
-        session = null;
+    private void disconnectAll() {
+        for (int i = 0; i < sessions.length; i++) {
+            disconnect(i);
+        }
+    }
+
+    private void disconnect(int profileIndex) {
+        Session current = sessions[profileIndex];
+        sessions[profileIndex] = null;
         if (current != null) {
             current.disconnect();
         }
@@ -160,6 +178,26 @@ public final class TunnelService extends Service {
                 : message;
     }
 
+    private synchronized void setProfileStatus(int profileIndex, String status) {
+        statuses[profileIndex] = PROFILES[profileIndex].name + ": " + status;
+        String summary = buildStatusSummary();
+        updateStatus(summary);
+        if (running.get()) {
+            startForeground(1, notification(summary.replace('\n', ' ')));
+        }
+    }
+
+    private String buildStatusSummary() {
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < PROFILES.length; i++) {
+            if (i > 0) {
+                builder.append('\n');
+            }
+            builder.append(statuses[i] == null ? PROFILES[i].name + ": stopped" : statuses[i]);
+        }
+        return builder.toString();
+    }
+
     private void updateStatus(String status) {
         getSharedPreferences(PREFS, MODE_PRIVATE)
                 .edit()
@@ -189,5 +227,19 @@ public final class TunnelService extends Service {
                 .setSmallIcon(android.R.drawable.stat_sys_upload_done)
                 .setOngoing(true)
                 .build();
+    }
+
+    private static final class TunnelProfile {
+        final String name;
+        final String sshHost;
+        final int localPort;
+        final String[] keyAssets;
+
+        TunnelProfile(String name, String sshHost, int localPort, String[] keyAssets) {
+            this.name = name;
+            this.sshHost = sshHost;
+            this.localPort = localPort;
+            this.keyAssets = keyAssets;
+        }
     }
 }

@@ -16,6 +16,7 @@ keys/*
 !keys/README.md
 app/src/main/assets/phone_tunnel_key
 app/src/main/assets/*_key
+app/src/main/assets/*_key.pub
 app/src/main/assets/*.pem
 app/src/main/assets/id_*
 

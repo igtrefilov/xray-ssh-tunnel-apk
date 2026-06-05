@@ -4,9 +4,11 @@ Small Android helper app that keeps an SSH local port forward for v2rayNG:
 
 ```text
 127.0.0.1:24443 -> SSH 107.161.82.52 -> 127.0.0.1:443
+127.0.0.1:34443 -> SSH 151.245.140.102 -> 127.0.0.1:443
 ```
 
-v2rayNG then uses a local VLESS/Reality profile pointed at `127.0.0.1:24443`.
+v2rayNG then uses local VLESS/Reality profiles pointed at `127.0.0.1:24443`
+for 107 or `127.0.0.1:34443` for 151.
 
 ## Runtime Behavior
 
@@ -22,7 +24,9 @@ The private SSH key is intentionally not tracked by git.
 Expected local file:
 
 ```text
-app/src/main/assets/phone_tunnel_key
+app/src/main/assets/phone_tunnel_107_ed25519_key
+app/src/main/assets/phone_tunnel_151_key
+app/src/main/assets/phone_tunnel_151_ed25519_key
 ```
 
 The matching public key must be added to the server user's `~/.ssh/authorized_keys`.
