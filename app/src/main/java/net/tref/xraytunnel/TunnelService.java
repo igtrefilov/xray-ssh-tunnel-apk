@@ -5,6 +5,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.os.IBinder;
 import android.util.Log;
 
@@ -93,7 +94,7 @@ public final class TunnelService extends Service {
             return;
         }
         createNotificationChannel();
-        startForeground(1, notification("connecting"));
+        showForegroundNotification("connecting");
         for (int i = 0; i < PROFILES.length; i++) {
             final int profileIndex = i;
             setProfileStatus(profileIndex, "connecting");
@@ -208,7 +209,18 @@ public final class TunnelService extends Service {
         String summary = buildStatusSummary();
         updateStatus(summary);
         if (running.get()) {
-            startForeground(1, notification(summary.replace('\n', ' ')));
+            showForegroundNotification(summary.replace('\n', ' '));
+        }
+    }
+
+    private void showForegroundNotification(String text) {
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            startForeground(
+                    1,
+                    notification(text),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+        } else {
+            startForeground(1, notification(text));
         }
     }
 

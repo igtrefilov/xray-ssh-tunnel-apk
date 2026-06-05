@@ -1,9 +1,11 @@
 package net.tref.xraytunnel;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -17,8 +19,11 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 public final class MainActivity extends Activity {
+    private static final int REQUEST_POST_NOTIFICATIONS = 1;
+
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView statusView;
+    private String pendingStartAction;
 
     private final Runnable refreshStatus = new Runnable() {
         @Override
@@ -106,12 +111,43 @@ public final class MainActivity extends Activity {
     }
 
     private void startService(String action) {
+        if (shouldRequestNotifications()) {
+            pendingStartAction = action;
+            requestPermissions(
+                    new String[] {Manifest.permission.POST_NOTIFICATIONS},
+                    REQUEST_POST_NOTIFICATIONS);
+            return;
+        }
         Intent intent = new Intent(this, TunnelService.class).setAction(action);
         if (android.os.Build.VERSION.SDK_INT >= 26) {
             startForegroundService(intent);
         } else {
             startService(intent);
         }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode,
+            String[] permissions,
+            int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_POST_NOTIFICATIONS || pendingStartAction == null) {
+            return;
+        }
+        String action = pendingStartAction;
+        pendingStartAction = null;
+        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startService(action);
+        } else {
+            Toast.makeText(this, "Notification permission is required", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private boolean shouldRequestNotifications() {
+        return android.os.Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED;
     }
 
     private void openAutostartSettings() {
