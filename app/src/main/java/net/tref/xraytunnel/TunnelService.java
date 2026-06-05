@@ -6,17 +6,26 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
 import android.os.IBinder;
+import android.util.Log;
 
+import com.jcraft.jsch.ChannelDirectTCPIP;
 import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.Session;
 
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketException;
 import java.util.Properties;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class TunnelService extends Service {
     public static final String ACTION_START = "net.tref.xraytunnel.START";
@@ -24,8 +33,12 @@ public final class TunnelService extends Service {
     public static final String PREFS = "tunnel";
     public static final String KEY_STATUS = "status";
 
+    private static final String TAG = "XrayTunnel";
     private static final String CHANNEL_ID = "tunnel";
     private static final int SSH_PORT = 22;
+    private static final int CHANNEL_CONNECT_TIMEOUT_MS = 10000;
+    private static final int LOCAL_BACKLOG = 128;
+    private static final int MAX_FORWARD_CONNECTIONS = 64;
     private static final String SSH_USER = "ilya";
     private static final String LOCAL_HOST = "127.0.0.1";
     private static final String REMOTE_HOST = "127.0.0.1";
@@ -43,9 +56,11 @@ public final class TunnelService extends Service {
                     new String[] {"phone_tunnel_151_key", "phone_tunnel_151_ed25519_key"})
     };
 
-    private final ExecutorService executor = Executors.newFixedThreadPool(PROFILES.length);
+    private final ExecutorService profileExecutor = Executors.newFixedThreadPool(PROFILES.length);
+    private final ExecutorService forwardExecutor = Executors.newCachedThreadPool();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final Session[] sessions = new Session[PROFILES.length];
+    private final LocalForwarder[] forwarders = new LocalForwarder[PROFILES.length];
     private final String[] statuses = new String[PROFILES.length];
 
     @Override
@@ -67,7 +82,8 @@ public final class TunnelService extends Service {
     @Override
     public void onDestroy() {
         stopTunnel();
-        executor.shutdownNow();
+        profileExecutor.shutdownNow();
+        forwardExecutor.shutdownNow();
         super.onDestroy();
     }
 
@@ -81,7 +97,7 @@ public final class TunnelService extends Service {
         for (int i = 0; i < PROFILES.length; i++) {
             final int profileIndex = i;
             setProfileStatus(profileIndex, "connecting");
-            executor.execute(() -> runLoop(profileIndex));
+            profileExecutor.execute(() -> runLoop(profileIndex));
         }
     }
 
@@ -116,12 +132,15 @@ public final class TunnelService extends Service {
                 nextSession.setServerAliveInterval(30000);
                 nextSession.setServerAliveCountMax(3);
                 nextSession.connect(15000);
-                nextSession.setPortForwardingL(LOCAL_HOST, profile.localPort, REMOTE_HOST, REMOTE_PORT);
                 sessions[profileIndex] = nextSession;
+
+                LocalForwarder forwarder = new LocalForwarder(profileIndex, profile, nextSession);
+                forwarder.start();
+                forwarders[profileIndex] = forwarder;
 
                 setProfileStatus(profileIndex, "listening on " + LOCAL_HOST + ":" + profile.localPort);
 
-                while (running.get() && nextSession.isConnected()) {
+                while (running.get() && nextSession.isConnected() && forwarder.isRunning()) {
                     Thread.sleep(2000);
                 }
             } catch (InterruptedException e) {
@@ -144,6 +163,12 @@ public final class TunnelService extends Service {
     }
 
     private void disconnect(int profileIndex) {
+        LocalForwarder forwarder = forwarders[profileIndex];
+        forwarders[profileIndex] = null;
+        if (forwarder != null) {
+            forwarder.close();
+        }
+
         Session current = sessions[profileIndex];
         sessions[profileIndex] = null;
         if (current != null) {
@@ -227,6 +252,115 @@ public final class TunnelService extends Service {
                 .setSmallIcon(android.R.drawable.stat_sys_upload_done)
                 .setOngoing(true)
                 .build();
+    }
+
+    private static void closeQuietly(Closeable closeable) {
+        if (closeable == null) {
+            return;
+        }
+        try {
+            closeable.close();
+        } catch (IOException ignored) {
+            // Best effort cleanup.
+        }
+    }
+
+    private final class LocalForwarder implements Closeable {
+        private final int profileIndex;
+        private final TunnelProfile profile;
+        private final Session session;
+        private final AtomicBoolean accepting = new AtomicBoolean(false);
+        private final AtomicInteger activeConnections = new AtomicInteger(0);
+        private ServerSocket serverSocket;
+
+        LocalForwarder(int profileIndex, TunnelProfile profile, Session session) {
+            this.profileIndex = profileIndex;
+            this.profile = profile;
+            this.session = session;
+        }
+
+        void start() throws IOException {
+            ServerSocket nextServerSocket = new ServerSocket();
+            nextServerSocket.setReuseAddress(true);
+            nextServerSocket.bind(
+                    new InetSocketAddress(InetAddress.getByName(LOCAL_HOST), profile.localPort),
+                    LOCAL_BACKLOG);
+            serverSocket = nextServerSocket;
+            accepting.set(true);
+            forwardExecutor.execute(this::acceptLoop);
+        }
+
+        boolean isRunning() {
+            return accepting.get();
+        }
+
+        @Override
+        public void close() {
+            accepting.set(false);
+            closeQuietly(serverSocket);
+        }
+
+        private void acceptLoop() {
+            try {
+                while (running.get() && accepting.get() && session.isConnected()) {
+                    Socket socket = serverSocket.accept();
+                    int active = activeConnections.incrementAndGet();
+                    if (active > MAX_FORWARD_CONNECTIONS) {
+                        activeConnections.decrementAndGet();
+                        closeQuietly(socket);
+                        Log.w(TAG, profile.name + " rejected local connection: too many active channels");
+                        continue;
+                    }
+                    forwardExecutor.execute(() -> forward(socket));
+                }
+            } catch (SocketException e) {
+                if (accepting.get() && running.get()) {
+                    Log.w(TAG, profile.name + " local listener stopped", e);
+                    setProfileStatus(profileIndex, "listener error: " + cleanMessage(e));
+                }
+            } catch (IOException e) {
+                if (accepting.get() && running.get()) {
+                    Log.w(TAG, profile.name + " local listener failed", e);
+                    setProfileStatus(profileIndex, "listener error: " + cleanMessage(e));
+                }
+            } finally {
+                accepting.set(false);
+                closeQuietly(serverSocket);
+            }
+        }
+
+        private void forward(Socket socket) {
+            ChannelDirectTCPIP channel = null;
+            try {
+                socket.setTcpNoDelay(true);
+                channel = (ChannelDirectTCPIP) session.openChannel("direct-tcpip");
+                channel.setHost(REMOTE_HOST);
+                channel.setPort(REMOTE_PORT);
+                channel.setOrgIPAddress(socket.getInetAddress().getHostAddress());
+                channel.setOrgPort(socket.getPort());
+                channel.setInputStream(socket.getInputStream());
+                channel.setOutputStream(socket.getOutputStream());
+                channel.connect(CHANNEL_CONNECT_TIMEOUT_MS);
+
+                while (running.get()
+                        && accepting.get()
+                        && session.isConnected()
+                        && !socket.isClosed()
+                        && !channel.isClosed()) {
+                    Thread.sleep(1000);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                Log.w(TAG, profile.name + " forward failed", e);
+            } finally {
+                if (channel != null) {
+                    channel.disconnect();
+                }
+                closeQuietly(socket);
+                activeConnections.decrementAndGet();
+            }
+        }
     }
 
     private static final class TunnelProfile {

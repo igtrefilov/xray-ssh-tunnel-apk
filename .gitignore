@@ -9,6 +9,7 @@ local.properties
 # Generated packages and screenshots
 *.apk
 *.aab
+*.idsig
 autostart-*.png
 
 # SSH tunnel secrets. Keep these local only.
