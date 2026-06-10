@@ -17,18 +17,13 @@ for 107 or `127.0.0.1:34443` for 151.
 - The `Autostart` button opens the MIUI/HyperOS autostart settings screen.
 - The `Battery` button opens battery optimization settings for the app.
 
-## SSH Keys
+## Device Setup
 
-Release APKs may include the deployment SSH private keys as ignored local
-assets so the APK works immediately after install. Those private keys are not
-tracked by git, but they are extractable from any published APK that includes
-them.
+Release APKs are built for this deployment and should work immediately after
+install. Development builds without local deployment assets generate credentials
+on the phone and display the active public keys.
 
-If bundled keys are absent, private SSH keys are generated on the phone and
-stored in the app-private files directory.
-
-On first launch the app displays the active public keys. If the APK was built
-without bundled keys, copy those public keys to the matching server user's
+For development builds, copy those public keys to the matching server user's
 `~/.ssh/authorized_keys`:
 
 ```text
