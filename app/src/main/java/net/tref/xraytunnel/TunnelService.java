@@ -4,8 +4,13 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.os.IBinder;
 import android.util.Log;
 
@@ -22,6 +27,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -63,6 +69,11 @@ public final class TunnelService extends Service {
     private final Session[] sessions = new Session[PROFILES.length];
     private final LocalForwarder[] forwarders = new LocalForwarder[PROFILES.length];
     private final String[] statuses = new String[PROFILES.length];
+    private final Object networkLock = new Object();
+
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private Network currentPreferredNetwork;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -95,6 +106,7 @@ public final class TunnelService extends Service {
         }
         createNotificationChannel();
         showForegroundNotification("connecting");
+        registerNetworkCallback();
         for (int i = 0; i < PROFILES.length; i++) {
             final int profileIndex = i;
             setProfileStatus(profileIndex, "connecting");
@@ -104,6 +116,7 @@ public final class TunnelService extends Service {
 
     private void stopTunnel() {
         running.set(false);
+        unregisterNetworkCallback();
         disconnectAll();
         updateStatus("stopped");
         stopForeground(true);
@@ -157,13 +170,13 @@ public final class TunnelService extends Service {
         setProfileStatus(profileIndex, "stopped");
     }
 
-    private void disconnectAll() {
+    private synchronized void disconnectAll() {
         for (int i = 0; i < sessions.length; i++) {
             disconnect(i);
         }
     }
 
-    private void disconnect(int profileIndex) {
+    private synchronized void disconnect(int profileIndex) {
         LocalForwarder forwarder = forwarders[profileIndex];
         forwarders[profileIndex] = null;
         if (forwarder != null) {
@@ -175,6 +188,103 @@ public final class TunnelService extends Service {
         if (current != null) {
             current.disconnect();
         }
+    }
+
+    private void registerNetworkCallback() {
+        ConnectivityManager manager =
+                (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (manager == null) {
+            return;
+        }
+
+        ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network network) {
+                reconnectIfPreferredNetworkChanged();
+            }
+
+            @Override
+            public void onLost(Network network) {
+                reconnectIfPreferredNetworkChanged();
+            }
+
+            @Override
+            public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
+                reconnectIfPreferredNetworkChanged();
+            }
+        };
+
+        NetworkRequest request = new NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                .build();
+
+        synchronized (networkLock) {
+            if (networkCallback != null) {
+                return;
+            }
+            connectivityManager = manager;
+            currentPreferredNetwork = UnderlyingNetworkSocketFactory.preferredUnderlyingNetwork(manager);
+            networkCallback = callback;
+        }
+
+        manager.registerNetworkCallback(request, callback);
+    }
+
+    private void unregisterNetworkCallback() {
+        ConnectivityManager manager;
+        ConnectivityManager.NetworkCallback callback;
+        synchronized (networkLock) {
+            manager = connectivityManager;
+            callback = networkCallback;
+            connectivityManager = null;
+            networkCallback = null;
+            currentPreferredNetwork = null;
+        }
+        if (manager != null && callback != null) {
+            try {
+                manager.unregisterNetworkCallback(callback);
+            } catch (RuntimeException ignored) {
+                // The callback may already be gone during service teardown.
+            }
+        }
+    }
+
+    private void reconnectIfPreferredNetworkChanged() {
+        if (!running.get()) {
+            return;
+        }
+
+        ConnectivityManager manager;
+        Network previousNetwork;
+        Network nextNetwork;
+        synchronized (networkLock) {
+            manager = connectivityManager;
+            if (manager == null) {
+                return;
+            }
+            previousNetwork = currentPreferredNetwork;
+            nextNetwork = UnderlyingNetworkSocketFactory.preferredUnderlyingNetwork(manager);
+            if (Objects.equals(previousNetwork, nextNetwork)) {
+                return;
+            }
+            currentPreferredNetwork = nextNetwork;
+        }
+
+        Log.i(TAG, "Underlying network changed from "
+                + describeNetwork(manager, previousNetwork) + " to "
+                + describeNetwork(manager, nextNetwork)
+                + "; reconnecting SSH sessions");
+        disconnectAll();
+    }
+
+    private String describeNetwork(ConnectivityManager manager, Network network) {
+        if (network == null) {
+            return "none";
+        }
+        return UnderlyingNetworkSocketFactory.describeNetwork(manager, network);
     }
 
     private byte[] readAsset(String name) throws IOException {
