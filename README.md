@@ -17,23 +17,24 @@ for 107 or `127.0.0.1:34443` for 151.
 - The `Autostart` button opens the MIUI/HyperOS autostart settings screen.
 - The `Battery` button opens battery optimization settings for the app.
 
-## Local Secrets
+## SSH Keys
 
-The private SSH key is intentionally not tracked by git.
+Private SSH keys are generated on the phone and stored in the app-private
+files directory. They are not stored in the APK and are not tracked by git.
 
-Expected local file:
+On first launch the app displays the generated public keys. Copy those public
+keys to the matching server user's `~/.ssh/authorized_keys`:
 
 ```text
-app/src/main/assets/phone_tunnel_107_ed25519_key
-app/src/main/assets/phone_tunnel_151_key
-app/src/main/assets/phone_tunnel_151_ed25519_key
+xray-ssh-tunnel-107 -> 107.161.82.52
+xray-ssh-tunnel-151 -> 151.245.140.102
 ```
 
-The matching public key must be added to the server user's `~/.ssh/authorized_keys`.
-For this deployment it should be restricted to port forwarding only, for example:
+For this deployment the authorized key should be restricted to port forwarding
+only, for example:
 
 ```text
-restrict,port-forwarding,permitopen="127.0.0.1:443",permitopen="localhost:443" ssh-rsa ... xray-phone-tunnel-107-rsa
+restrict,port-forwarding,permitopen="127.0.0.1:443",permitopen="localhost:443" ssh-rsa ... xray-ssh-tunnel-107
 ```
 
 ## Build
@@ -49,13 +50,17 @@ Then build:
 
 ```bash
 gradle assembleDebug
+gradle assembleRelease
 ```
 
-The debug APK will be generated under:
+The APKs will be generated under:
 
 ```text
 app/build/outputs/apk/debug/app-debug.apk
+app/build/outputs/apk/release/app-release-unsigned.apk
 ```
+
+Release APKs must be signed before installation.
 
 ## ADB Install
 

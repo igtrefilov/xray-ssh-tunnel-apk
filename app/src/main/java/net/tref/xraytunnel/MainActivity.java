@@ -2,7 +2,10 @@ package net.tref.xraytunnel;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -15,6 +18,7 @@ import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -23,6 +27,8 @@ public final class MainActivity extends Activity {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView statusView;
+    private TextView keysView;
+    private String publicKeys;
     private String pendingStartAction;
 
     private final Runnable refreshStatus = new Runnable() {
@@ -38,11 +44,15 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER_HORIZONTAL);
         int pad = dp(20);
         root.setPadding(pad, pad, pad, pad);
+        scroll.addView(root, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView title = new TextView(this);
         title.setText("Xray SSH Tunnel");
@@ -52,8 +62,7 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView config = new TextView(this);
-        config.setText("107: 127.0.0.1:24443 -> 107.161.82.52:127.0.0.1:443\n"
-                + "151: 127.0.0.1:34443 -> 151.245.140.102:127.0.0.1:443");
+        config.setText(buildConfigText());
         config.setTextSize(14);
         config.setPadding(0, dp(12), 0, dp(20));
         root.addView(config, new LinearLayout.LayoutParams(
@@ -64,6 +73,28 @@ public final class MainActivity extends Activity {
         statusView.setTextSize(16);
         statusView.setPadding(0, 0, 0, dp(20));
         root.addView(statusView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView keysTitle = new TextView(this);
+        keysTitle.setText("SSH public keys");
+        keysTitle.setTextSize(16);
+        root.addView(keysTitle, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        keysView = new TextView(this);
+        keysView.setTextSize(12);
+        keysView.setTextIsSelectable(true);
+        keysView.setPadding(0, dp(8), 0, dp(12));
+        root.addView(keysView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        Button copyKeys = new Button(this);
+        copyKeys.setText("Copy public keys");
+        copyKeys.setOnClickListener(v -> copyPublicKeys());
+        root.addView(copyKeys, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -95,7 +126,8 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        setContentView(root);
+        setContentView(scroll);
+        loadPublicKeys();
     }
 
     @Override
@@ -148,6 +180,65 @@ public final class MainActivity extends Activity {
         return android.os.Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED;
+    }
+
+    private String buildConfigText() {
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < TunnelConfig.PROFILES.length; i++) {
+            TunnelProfile profile = TunnelConfig.PROFILES[i];
+            if (i > 0) {
+                builder.append('\n');
+            }
+            builder.append(profile.name)
+                    .append(": ")
+                    .append(TunnelConfig.LOCAL_HOST)
+                    .append(':')
+                    .append(profile.localPort)
+                    .append(" -> ")
+                    .append(profile.sshHost)
+                    .append(':')
+                    .append(TunnelConfig.REMOTE_HOST)
+                    .append(':')
+                    .append(TunnelConfig.REMOTE_PORT);
+        }
+        return builder.toString();
+    }
+
+    private void loadPublicKeys() {
+        keysView.setText("Generating SSH keys...");
+        Context appContext = getApplicationContext();
+        new Thread(() -> {
+            try {
+                String keys = SshKeyStore.authorizedKeys(appContext);
+                handler.post(() -> {
+                    publicKeys = keys;
+                    keysView.setText(keys);
+                });
+            } catch (Exception e) {
+                handler.post(() -> keysView.setText("SSH key error: " + cleanMessage(e)));
+            }
+        }, "ssh-key-loader").start();
+    }
+
+    private void copyPublicKeys() {
+        if (publicKeys == null || publicKeys.trim().isEmpty()) {
+            Toast.makeText(this, "SSH public keys are not ready", Toast.LENGTH_LONG).show();
+            return;
+        }
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null) {
+            Toast.makeText(this, "Clipboard is not available", Toast.LENGTH_LONG).show();
+            return;
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText("SSH public keys", publicKeys));
+        Toast.makeText(this, "SSH public keys copied", Toast.LENGTH_SHORT).show();
+    }
+
+    private String cleanMessage(Exception e) {
+        String message = e.getMessage();
+        return message == null || message.trim().isEmpty()
+                ? e.getClass().getSimpleName()
+                : message;
     }
 
     private void openAutostartSettings() {
