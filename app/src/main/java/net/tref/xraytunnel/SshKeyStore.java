@@ -10,7 +10,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 
 final class SshKeyStore {
@@ -24,12 +26,20 @@ final class SshKeyStore {
 
     static synchronized byte[] privateKey(Context context, TunnelProfile profile)
             throws IOException, JSchException {
+        byte[] bundledPrivateKey = readAssetIfPresent(context, profile.privateKeyAsset);
+        if (bundledPrivateKey != null) {
+            return bundledPrivateKey;
+        }
         ensureKeyPair(context, profile);
         return readFile(privateKeyFile(context, profile));
     }
 
     static synchronized String publicKey(Context context, TunnelProfile profile)
             throws IOException, JSchException {
+        byte[] bundledPublicKey = readAssetIfPresent(context, profile.publicKeyAsset);
+        if (bundledPublicKey != null) {
+            return new String(bundledPublicKey, StandardCharsets.UTF_8).trim();
+        }
         ensureKeyPair(context, profile);
         return new String(readFile(publicKeyFile(context, profile)), StandardCharsets.UTF_8).trim();
     }
@@ -108,6 +118,23 @@ final class SshKeyStore {
             }
         }
         return data;
+    }
+
+    private static byte[] readAssetIfPresent(Context context, String assetName) throws IOException {
+        if (assetName == null || assetName.trim().isEmpty()) {
+            return null;
+        }
+        try (InputStream in = context.getAssets().open(assetName);
+                ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+            return out.toByteArray();
+        } catch (FileNotFoundException e) {
+            return null;
+        }
     }
 
     private static void writeFile(File file, byte[] data) throws IOException {

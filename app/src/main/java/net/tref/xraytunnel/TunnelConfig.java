@@ -8,8 +8,18 @@ final class TunnelConfig {
     static final int REMOTE_PORT = 443;
 
     static final TunnelProfile[] PROFILES = new TunnelProfile[] {
-            new TunnelProfile("107", "107.161.82.52", 24443),
-            new TunnelProfile("151", "151.245.140.102", 34443)
+            new TunnelProfile(
+                    "107",
+                    "107.161.82.52",
+                    24443,
+                    "phone_tunnel_key",
+                    "phone_tunnel_key.pub"),
+            new TunnelProfile(
+                    "151",
+                    "151.245.140.102",
+                    34443,
+                    "phone_tunnel_151_key",
+                    "phone_tunnel_151_key.pub")
     };
 
     private TunnelConfig() {

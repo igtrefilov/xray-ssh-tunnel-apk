@@ -20,6 +20,7 @@ app/src/main/assets/*_key
 app/src/main/assets/*_key.pub
 app/src/main/assets/*.pem
 app/src/main/assets/id_*
+app/src/main/assets-bundled/
 
 # OS/editor noise
 .DS_Store

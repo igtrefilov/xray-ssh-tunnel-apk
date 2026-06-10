@@ -19,11 +19,17 @@ for 107 or `127.0.0.1:34443` for 151.
 
 ## SSH Keys
 
-Private SSH keys are generated on the phone and stored in the app-private
-files directory. They are not stored in the APK and are not tracked by git.
+Release APKs may include the deployment SSH private keys as ignored local
+assets so the APK works immediately after install. Those private keys are not
+tracked by git, but they are extractable from any published APK that includes
+them.
 
-On first launch the app displays the generated public keys. Copy those public
-keys to the matching server user's `~/.ssh/authorized_keys`:
+If bundled keys are absent, private SSH keys are generated on the phone and
+stored in the app-private files directory.
+
+On first launch the app displays the active public keys. If the APK was built
+without bundled keys, copy those public keys to the matching server user's
+`~/.ssh/authorized_keys`:
 
 ```text
 xray-ssh-tunnel-107 -> 107.161.82.52
