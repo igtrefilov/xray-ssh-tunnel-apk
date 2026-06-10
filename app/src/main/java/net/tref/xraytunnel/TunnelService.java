@@ -42,8 +42,8 @@ public final class TunnelService extends Service {
     private static final String TAG = "XrayTunnel";
     private static final String CHANNEL_ID = "tunnel";
     private static final int CHANNEL_CONNECT_TIMEOUT_MS = 10000;
-    private static final int LOCAL_BACKLOG = 128;
-    private static final int MAX_FORWARD_CONNECTIONS = 64;
+    private static final int LOCAL_BACKLOG = 256;
+    private static final int MAX_FORWARD_CONNECTIONS = 256;
 
     private final ExecutorService profileExecutor =
             Executors.newFixedThreadPool(TunnelConfig.PROFILES.length);
@@ -412,7 +412,9 @@ public final class TunnelService extends Service {
                     if (active > MAX_FORWARD_CONNECTIONS) {
                         activeConnections.decrementAndGet();
                         closeQuietly(socket);
-                        Log.w(TAG, profile.name + " rejected local connection: too many active channels");
+                        Log.w(TAG, profile.name
+                                + " rejected local connection: too many active channels ("
+                                + active + "/" + MAX_FORWARD_CONNECTIONS + ")");
                         continue;
                     }
                     forwardExecutor.execute(() -> forward(socket));
