@@ -11,7 +11,9 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
+import android.net.wifi.WifiManager;
 import android.os.IBinder;
+import android.os.PowerManager;
 import android.util.Log;
 
 import com.jcraft.jsch.ChannelDirectTCPIP;
@@ -57,6 +59,8 @@ public final class TunnelService extends Service {
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
     private Network currentPreferredNetwork;
+    private PowerManager.WakeLock wakeLock;
+    private WifiManager.WifiLock wifiLock;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -89,6 +93,7 @@ public final class TunnelService extends Service {
         }
         createNotificationChannel();
         showForegroundNotification("connecting");
+        acquirePowerLocks();
         registerNetworkCallback();
         for (int i = 0; i < TunnelConfig.PROFILES.length; i++) {
             final int profileIndex = i;
@@ -101,6 +106,7 @@ public final class TunnelService extends Service {
         running.set(false);
         unregisterNetworkCallback();
         disconnectAll();
+        releasePowerLocks();
         updateStatus("stopped");
         stopForeground(true);
         stopSelf();
@@ -238,6 +244,69 @@ public final class TunnelService extends Service {
                 manager.unregisterNetworkCallback(callback);
             } catch (RuntimeException ignored) {
                 // The callback may already be gone during service teardown.
+            }
+        }
+    }
+
+    private synchronized void acquirePowerLocks() {
+        if (wakeLock == null || !wakeLock.isHeld()) {
+            PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (powerManager != null) {
+                PowerManager.WakeLock nextWakeLock = powerManager.newWakeLock(
+                        PowerManager.PARTIAL_WAKE_LOCK,
+                        TAG + ":tunnel");
+                nextWakeLock.setReferenceCounted(false);
+                try {
+                    nextWakeLock.acquire();
+                    wakeLock = nextWakeLock;
+                } catch (RuntimeException e) {
+                    Log.w(TAG, "Failed to acquire tunnel wake lock", e);
+                }
+            }
+        }
+
+        if (wifiLock == null || !wifiLock.isHeld()) {
+            WifiManager wifiManager =
+                    (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wifiManager != null) {
+                int lockMode = android.os.Build.VERSION.SDK_INT >= 29
+                        ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                        : WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+                WifiManager.WifiLock nextWifiLock =
+                        wifiManager.createWifiLock(lockMode, TAG + ":wifi");
+                nextWifiLock.setReferenceCounted(false);
+                try {
+                    nextWifiLock.acquire();
+                    wifiLock = nextWifiLock;
+                } catch (RuntimeException e) {
+                    Log.w(TAG, "Failed to acquire tunnel Wi-Fi lock", e);
+                }
+            }
+        }
+    }
+
+    private synchronized void releasePowerLocks() {
+        if (wifiLock != null) {
+            try {
+                if (wifiLock.isHeld()) {
+                    wifiLock.release();
+                }
+            } catch (RuntimeException e) {
+                Log.w(TAG, "Failed to release tunnel Wi-Fi lock", e);
+            } finally {
+                wifiLock = null;
+            }
+        }
+
+        if (wakeLock != null) {
+            try {
+                if (wakeLock.isHeld()) {
+                    wakeLock.release();
+                }
+            } catch (RuntimeException e) {
+                Log.w(TAG, "Failed to release tunnel wake lock", e);
+            } finally {
+                wakeLock = null;
             }
         }
     }

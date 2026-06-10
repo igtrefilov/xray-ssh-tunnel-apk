@@ -13,6 +13,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.ViewGroup;
@@ -24,12 +25,14 @@ import android.widget.Toast;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_POST_NOTIFICATIONS = 1;
+    private static final String KEY_BATTERY_PROMPT_SHOWN = "battery_prompt_shown";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView statusView;
     private TextView keysView;
     private String publicKeys;
-    private String pendingStartAction;
+    private String pendingBatteryAction;
+    private String pendingNotificationAction;
 
     private final Runnable refreshStatus = new Runnable() {
         @Override
@@ -100,14 +103,14 @@ public final class MainActivity extends Activity {
 
         Button start = new Button(this);
         start.setText("Start");
-        start.setOnClickListener(v -> startService(TunnelService.ACTION_START));
+        start.setOnClickListener(v -> startTunnelService(TunnelService.ACTION_START));
         root.addView(start, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         Button stop = new Button(this);
         stop.setText("Stop");
-        stop.setOnClickListener(v -> startService(TunnelService.ACTION_STOP));
+        stop.setOnClickListener(v -> startTunnelService(TunnelService.ACTION_STOP));
         root.addView(stop, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -134,6 +137,11 @@ public final class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         handler.post(refreshStatus);
+        if (pendingBatteryAction != null) {
+            String action = pendingBatteryAction;
+            pendingBatteryAction = null;
+            handler.post(() -> startTunnelService(action));
+        }
     }
 
     @Override
@@ -142,9 +150,22 @@ public final class MainActivity extends Activity {
         super.onPause();
     }
 
-    private void startService(String action) {
+    private void startTunnelService(String action) {
+        if (TunnelService.ACTION_START.equals(action) && shouldShowBatteryOptimizationPrompt()) {
+            getSharedPreferences(TunnelService.PREFS, MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(KEY_BATTERY_PROMPT_SHOWN, true)
+                    .apply();
+            pendingBatteryAction = action;
+            if (!openBatteryOptimizationSettings()) {
+                pendingBatteryAction = null;
+                startTunnelService(action);
+            }
+            return;
+        }
+
         if (shouldRequestNotifications()) {
-            pendingStartAction = action;
+            pendingNotificationAction = action;
             requestPermissions(
                     new String[] {Manifest.permission.POST_NOTIFICATIONS},
                     REQUEST_POST_NOTIFICATIONS);
@@ -164,13 +185,13 @@ public final class MainActivity extends Activity {
             String[] permissions,
             int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode != REQUEST_POST_NOTIFICATIONS || pendingStartAction == null) {
+        if (requestCode != REQUEST_POST_NOTIFICATIONS || pendingNotificationAction == null) {
             return;
         }
-        String action = pendingStartAction;
-        pendingStartAction = null;
+        String action = pendingNotificationAction;
+        pendingNotificationAction = null;
         if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            startService(action);
+            startTunnelService(action);
         } else {
             Toast.makeText(this, "Notification permission is required", Toast.LENGTH_LONG).show();
         }
@@ -180,6 +201,19 @@ public final class MainActivity extends Activity {
         return android.os.Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean shouldShowBatteryOptimizationPrompt() {
+        if (android.os.Build.VERSION.SDK_INT < 23) {
+            return false;
+        }
+        SharedPreferences prefs = getSharedPreferences(TunnelService.PREFS, MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_BATTERY_PROMPT_SHOWN, false)) {
+            return false;
+        }
+        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+        return powerManager != null
+                && !powerManager.isIgnoringBatteryOptimizations(getPackageName());
     }
 
     private String buildConfigText() {
@@ -265,15 +299,19 @@ public final class MainActivity extends Activity {
     }
 
     private void openBatterySettings() {
+        if (!openBatteryOptimizationSettings()) {
+            Toast.makeText(this, "Battery settings not available", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private boolean openBatteryOptimizationSettings() {
         Intent requestIgnore = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
                 .setData(Uri.parse("package:" + getPackageName()));
         Intent batteryOptimization = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
         Intent appSettings = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
                 .setData(Uri.parse("package:" + getPackageName()));
 
-        if (!startFirstAvailable(requestIgnore, batteryOptimization, appSettings)) {
-            Toast.makeText(this, "Battery settings not available", Toast.LENGTH_LONG).show();
-        }
+        return startFirstAvailable(requestIgnore, batteryOptimization, appSettings);
     }
 
     private boolean startFirstAvailable(Intent... intents) {
