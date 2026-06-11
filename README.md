@@ -21,18 +21,16 @@ for 107 or `127.0.0.1:34443` for 151.
 
 Release APKs are built for this deployment and should work immediately after
 install. Development builds without local deployment assets generate credentials
-on the phone and display the active public keys.
+on the phone for local testing, but the app does not expose SSH key material in
+the UI.
 
-For development builds, copy those public keys to the matching server user's
-`~/.ssh/authorized_keys`:
+For this deployment the server-side account should be restricted to port
+forwarding only:
 
 ```text
 xray-ssh-tunnel-107 -> 107.161.82.52
 xray-ssh-tunnel-151 -> 151.245.140.102
 ```
-
-For this deployment the authorized key should be restricted to port forwarding
-only, for example:
 
 ```text
 restrict,port-forwarding,permitopen="127.0.0.1:443",permitopen="localhost:443" ssh-rsa ... xray-ssh-tunnel-107

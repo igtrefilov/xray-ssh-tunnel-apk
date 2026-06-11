@@ -2,10 +2,7 @@ package net.tref.xraytunnel;
 
 import android.Manifest;
 import android.app.Activity;
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.ComponentName;
-import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -29,8 +26,6 @@ public final class MainActivity extends Activity {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView statusView;
-    private TextView keysView;
-    private String publicKeys;
     private String pendingBatteryAction;
     private String pendingNotificationAction;
 
@@ -79,28 +74,6 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        TextView keysTitle = new TextView(this);
-        keysTitle.setText("SSH public keys");
-        keysTitle.setTextSize(16);
-        root.addView(keysTitle, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        keysView = new TextView(this);
-        keysView.setTextSize(12);
-        keysView.setTextIsSelectable(true);
-        keysView.setPadding(0, dp(8), 0, dp(12));
-        root.addView(keysView, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        Button copyKeys = new Button(this);
-        copyKeys.setText("Copy public keys");
-        copyKeys.setOnClickListener(v -> copyPublicKeys());
-        root.addView(copyKeys, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-
         Button start = new Button(this);
         start.setText("Start");
         start.setOnClickListener(v -> startTunnelService(TunnelService.ACTION_START));
@@ -130,7 +103,6 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         setContentView(scroll);
-        loadPublicKeys();
     }
 
     @Override
@@ -236,43 +208,6 @@ public final class MainActivity extends Activity {
                     .append(TunnelConfig.REMOTE_PORT);
         }
         return builder.toString();
-    }
-
-    private void loadPublicKeys() {
-        keysView.setText("Generating SSH keys...");
-        Context appContext = getApplicationContext();
-        new Thread(() -> {
-            try {
-                String keys = SshKeyStore.authorizedKeys(appContext);
-                handler.post(() -> {
-                    publicKeys = keys;
-                    keysView.setText(keys);
-                });
-            } catch (Exception e) {
-                handler.post(() -> keysView.setText("SSH key error: " + cleanMessage(e)));
-            }
-        }, "ssh-key-loader").start();
-    }
-
-    private void copyPublicKeys() {
-        if (publicKeys == null || publicKeys.trim().isEmpty()) {
-            Toast.makeText(this, "SSH public keys are not ready", Toast.LENGTH_LONG).show();
-            return;
-        }
-        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-        if (clipboard == null) {
-            Toast.makeText(this, "Clipboard is not available", Toast.LENGTH_LONG).show();
-            return;
-        }
-        clipboard.setPrimaryClip(ClipData.newPlainText("SSH public keys", publicKeys));
-        Toast.makeText(this, "SSH public keys copied", Toast.LENGTH_SHORT).show();
-    }
-
-    private String cleanMessage(Exception e) {
-        String message = e.getMessage();
-        return message == null || message.trim().isEmpty()
-                ? e.getClass().getSimpleName()
-                : message;
     }
 
     private void openAutostartSettings() {
