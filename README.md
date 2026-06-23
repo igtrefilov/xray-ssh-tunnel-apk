@@ -13,7 +13,9 @@ for 151.
 
 - `TunnelService` runs as a foreground service and keeps the SSH tunnel alive.
 - `BootReceiver` starts the service on `BOOT_COMPLETED` and after APK replacement.
-- The UI is intentionally limited to tunnel status plus `Start` and `Stop`.
+- The UI shows tunnel status, `Start` / `Stop`, and a settings section for the
+  VPS host, SSH user/port, local listener, remote target, and SSH host-key
+  checking. Saved settings take effect after restarting the tunnel.
 
 ## Device Setup
 
@@ -21,6 +23,15 @@ Release APKs are built for this deployment and should work immediately after
 install. The deployment private key must be bundled as
 `app/src/main/assets-bundled/phone_tunnel_151_key`; the app does not generate
 fallback SSH keys on the phone.
+
+Default settings:
+
+```text
+SSH: ilya@151.245.140.102:22
+Listen: 127.0.0.1:34443
+Target: 127.0.0.1:443
+Verify SSH host key: enabled
+```
 
 For this deployment the server-side account should be restricted to port
 forwarding only:

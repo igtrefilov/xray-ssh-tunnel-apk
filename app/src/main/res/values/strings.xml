@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">Xray SSH Tunnel</string>
+    <string name="button_start">Start</string>
+    <string name="button_stop">Stop</string>
+    <string name="settings_title">Settings</string>
+    <string name="settings_vps_ip">VPS IP</string>
+    <string name="settings_ssh_user">SSH user</string>
+    <string name="settings_ssh_port">SSH port</string>
+    <string name="settings_listen_ip">Listen IP</string>
+    <string name="settings_listen_port">Listen port</string>
+    <string name="settings_target_ip">Target IP</string>
+    <string name="settings_target_port">Target port</string>
+    <string name="settings_verify_host_key">Verify SSH host key</string>
+    <string name="settings_save">Save settings</string>
+    <string name="settings_reset">Reset defaults</string>
+    <string name="settings_saved">Settings saved. Restart tunnel to apply.</string>
+    <string name="settings_reset_done">Default settings restored. Restart tunnel to apply.</string>
+    <string name="notification_permission_required">Notification permission is required</string>
+</resources>

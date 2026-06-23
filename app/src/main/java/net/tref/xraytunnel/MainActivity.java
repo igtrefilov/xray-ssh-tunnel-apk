@@ -8,9 +8,12 @@ import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -21,6 +24,14 @@ public final class MainActivity extends Activity {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView statusView;
+    private EditText sshHostInput;
+    private EditText sshUserInput;
+    private EditText sshPortInput;
+    private EditText localHostInput;
+    private EditText localPortInput;
+    private EditText remoteHostInput;
+    private EditText remotePortInput;
+    private CheckBox verifyHostKeyInput;
     private String pendingNotificationAction;
 
     private final Runnable refreshStatus = new Runnable() {
@@ -47,40 +58,34 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView title = new TextView(this);
-        title.setText("Xray SSH Tunnel");
+        title.setText(R.string.app_name);
         title.setTextSize(22);
         root.addView(title, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        TextView config = new TextView(this);
-        config.setText(buildConfigText());
-        config.setTextSize(14);
-        config.setPadding(0, dp(12), 0, dp(20));
-        root.addView(config, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-
         statusView = new TextView(this);
         statusView.setTextSize(16);
-        statusView.setPadding(0, 0, 0, dp(20));
+        statusView.setPadding(0, dp(12), 0, dp(20));
         root.addView(statusView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         Button start = new Button(this);
-        start.setText("Start");
+        start.setText(R.string.button_start);
         start.setOnClickListener(v -> startTunnelService(TunnelService.ACTION_START));
         root.addView(start, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         Button stop = new Button(this);
-        stop.setText("Stop");
+        stop.setText(R.string.button_stop);
         stop.setOnClickListener(v -> startTunnelService(TunnelService.ACTION_STOP));
         root.addView(stop, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        addSettingsSection(root);
 
         setContentView(scroll);
     }
@@ -131,7 +136,7 @@ public final class MainActivity extends Activity {
         if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             startTunnelService(action);
         } else {
-            Toast.makeText(this, "Notification permission is required", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, R.string.notification_permission_required, Toast.LENGTH_LONG).show();
         }
     }
 
@@ -141,26 +146,142 @@ public final class MainActivity extends Activity {
                 != PackageManager.PERMISSION_GRANTED;
     }
 
-    private String buildConfigText() {
-        StringBuilder builder = new StringBuilder();
-        for (int i = 0; i < TunnelConfig.PROFILES.length; i++) {
-            TunnelProfile profile = TunnelConfig.PROFILES[i];
-            if (i > 0) {
-                builder.append('\n');
-            }
-            builder.append(profile.name)
-                    .append(": ")
-                    .append(TunnelConfig.LOCAL_HOST)
-                    .append(':')
-                    .append(profile.localPort)
-                    .append(" -> ")
-                    .append(profile.sshHost)
-                    .append(':')
-                    .append(TunnelConfig.REMOTE_HOST)
-                    .append(':')
-                    .append(TunnelConfig.REMOTE_PORT);
+    private void addSettingsSection(LinearLayout root) {
+        TunnelSettings.Values values = TunnelSettings.loadValues(this);
+
+        TextView settingsTitle = new TextView(this);
+        settingsTitle.setText(R.string.settings_title);
+        settingsTitle.setTextSize(18);
+        settingsTitle.setPadding(0, dp(24), 0, dp(8));
+        root.addView(settingsTitle, fullWidthWrapContent());
+
+        sshHostInput = addTextInput(root, R.string.settings_vps_ip, values.sshHost, textInputType());
+        sshUserInput = addTextInput(root, R.string.settings_ssh_user, values.sshUser, textInputType());
+        sshPortInput = addTextInput(
+                root,
+                R.string.settings_ssh_port,
+                String.valueOf(values.sshPort),
+                portInputType());
+        localHostInput = addTextInput(root, R.string.settings_listen_ip, values.localHost, textInputType());
+        localPortInput = addTextInput(
+                root,
+                R.string.settings_listen_port,
+                String.valueOf(values.localPort),
+                portInputType());
+        remoteHostInput = addTextInput(root, R.string.settings_target_ip, values.remoteHost, textInputType());
+        remotePortInput = addTextInput(
+                root,
+                R.string.settings_target_port,
+                String.valueOf(values.remotePort),
+                portInputType());
+
+        verifyHostKeyInput = new CheckBox(this);
+        verifyHostKeyInput.setText(R.string.settings_verify_host_key);
+        verifyHostKeyInput.setChecked(values.verifyHostKey);
+        root.addView(verifyHostKeyInput, fullWidthWrapContent());
+
+        Button save = new Button(this);
+        save.setText(R.string.settings_save);
+        save.setOnClickListener(v -> saveSettings());
+        root.addView(save, fullWidthWrapContent());
+
+        Button reset = new Button(this);
+        reset.setText(R.string.settings_reset);
+        reset.setOnClickListener(v -> resetSettings());
+        root.addView(reset, fullWidthWrapContent());
+    }
+
+    private EditText addTextInput(
+            LinearLayout root,
+            int labelResId,
+            String value,
+            int inputType) {
+        TextView labelView = new TextView(this);
+        labelView.setText(labelResId);
+        labelView.setTextSize(12);
+        labelView.setPadding(0, dp(8), 0, 0);
+        root.addView(labelView, fullWidthWrapContent());
+
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(value);
+        input.setInputType(inputType);
+        root.addView(input, fullWidthWrapContent());
+        return input;
+    }
+
+    private void saveSettings() {
+        try {
+            TunnelSettings.saveValues(this, readSettingsFromInputs());
+            Toast.makeText(this, R.string.settings_saved, Toast.LENGTH_LONG).show();
+        } catch (IllegalArgumentException e) {
+            Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show();
         }
-        return builder.toString();
+    }
+
+    private void resetSettings() {
+        TunnelSettings.Values defaults = TunnelSettings.defaultValues();
+        populateSettings(defaults);
+        TunnelSettings.saveValues(this, defaults);
+        Toast.makeText(this, R.string.settings_reset_done, Toast.LENGTH_LONG).show();
+    }
+
+    private TunnelSettings.Values readSettingsFromInputs() {
+        return new TunnelSettings.Values(
+                requiredText(sshHostInput, "VPS IP"),
+                requiredText(sshUserInput, "SSH user"),
+                parsePort(sshPortInput, "SSH port"),
+                requiredText(localHostInput, "Listen IP"),
+                parsePort(localPortInput, "Listen port"),
+                requiredText(remoteHostInput, "Target IP"),
+                parsePort(remotePortInput, "Target port"),
+                verifyHostKeyInput.isChecked());
+    }
+
+    private void populateSettings(TunnelSettings.Values values) {
+        sshHostInput.setText(values.sshHost);
+        sshUserInput.setText(values.sshUser);
+        sshPortInput.setText(String.valueOf(values.sshPort));
+        localHostInput.setText(values.localHost);
+        localPortInput.setText(String.valueOf(values.localPort));
+        remoteHostInput.setText(values.remoteHost);
+        remotePortInput.setText(String.valueOf(values.remotePort));
+        verifyHostKeyInput.setChecked(values.verifyHostKey);
+    }
+
+    private String requiredText(EditText input, String label) {
+        String value = input.getText().toString().trim();
+        if (value.isEmpty()) {
+            throw new IllegalArgumentException(label + " is required");
+        }
+        return value;
+    }
+
+    private int parsePort(EditText input, String label) {
+        String value = requiredText(input, label);
+        try {
+            int port = Integer.parseInt(value);
+            if (TunnelSettings.isValidPort(port)) {
+                return port;
+            }
+        } catch (NumberFormatException ignored) {
+            // Fall through to a single validation message.
+        }
+        throw new IllegalArgumentException(label + " must be 1-65535");
+    }
+
+    private int textInputType() {
+        return InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI;
+    }
+
+    private int portInputType() {
+        return InputType.TYPE_CLASS_NUMBER;
+    }
+
+    private LinearLayout.LayoutParams fullWidthWrapContent() {
+        return new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
     }
 
     private int dp(int value) {

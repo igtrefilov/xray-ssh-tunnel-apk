@@ -43,8 +43,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class TunnelService extends Service {
     public static final String ACTION_START = "net.tref.xraytunnel.START";
     public static final String ACTION_STOP = "net.tref.xraytunnel.STOP";
-    public static final String PREFS = "tunnel";
-    public static final String KEY_STATUS = "status";
+    public static final String PREFS = TunnelSettings.PREFS;
+    public static final String KEY_STATUS = TunnelSettings.KEY_STATUS;
 
     private static final String TAG = "XrayTunnel";
     private static final String CHANNEL_ID = "tunnel";
@@ -54,15 +54,18 @@ public final class TunnelService extends Service {
     private static final int MAX_FORWARD_CONNECTIONS = 256;
 
     private final ExecutorService profileExecutor =
-            Executors.newFixedThreadPool(TunnelConfig.PROFILES.length);
+            Executors.newFixedThreadPool(TunnelConfig.PROFILE_COUNT);
     private final ExecutorService forwardExecutor = Executors.newCachedThreadPool();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean foregroundStarted = new AtomicBoolean(false);
-    private final Session[] sessions = new Session[TunnelConfig.PROFILES.length];
-    private final LocalForwarder[] forwarders = new LocalForwarder[TunnelConfig.PROFILES.length];
-    private final String[] statuses = new String[TunnelConfig.PROFILES.length];
+    private final Session[] sessions = new Session[TunnelConfig.PROFILE_COUNT];
+    private final LocalForwarder[] forwarders = new LocalForwarder[TunnelConfig.PROFILE_COUNT];
+    private final String[] statuses = new String[TunnelConfig.PROFILE_COUNT];
     private final Object networkLock = new Object();
 
+    private TunnelProfile[] profiles = new TunnelProfile[] {
+            TunnelSettings.defaultValues().toProfile()
+    };
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
     private Network currentPreferredNetwork;
@@ -106,9 +109,10 @@ public final class TunnelService extends Service {
         }
         createNotificationChannel();
         showForegroundNotification("connecting");
+        profiles = TunnelSettings.profiles(this);
         acquirePowerLocks();
         registerNetworkCallback();
-        for (int i = 0; i < TunnelConfig.PROFILES.length; i++) {
+        for (int i = 0; i < profiles.length; i++) {
             final int profileIndex = i;
             setProfileStatus(profileIndex, "connecting");
             profileExecutor.execute(() -> runLoop(profileIndex));
@@ -127,31 +131,33 @@ public final class TunnelService extends Service {
     }
 
     private void runLoop(int profileIndex) {
-        TunnelProfile profile = TunnelConfig.PROFILES[profileIndex];
+        TunnelProfile profile = profiles[profileIndex];
         while (running.get()) {
             Session nextSession = null;
             LocalForwarder forwarder = null;
             try {
                 setProfileStatus(profileIndex,
-                        "connecting to " + profile.sshHost + ":" + TunnelConfig.SSH_PORT);
+                        "connecting to " + profile.sshHost + ":" + profile.sshPort);
 
                 JSch jsch = new JSch();
                 jsch.addIdentity(
-                        profile.name + "-generated",
+                        profile.sshHost + "-bundled",
                         SshKeyStore.privateKey(this, profile),
                         null,
                         null);
-                try (InputStream knownHosts = getAssets().open("known_hosts")) {
-                    jsch.setKnownHosts(knownHosts);
+                if (profile.verifyHostKey) {
+                    try (InputStream knownHosts = getAssets().open("known_hosts")) {
+                        jsch.setKnownHosts(knownHosts);
+                    }
                 }
 
                 nextSession = jsch.getSession(
-                        TunnelConfig.SSH_USER,
+                        profile.sshUser,
                         profile.sshHost,
-                        TunnelConfig.SSH_PORT);
+                        profile.sshPort);
                 nextSession.setSocketFactory(new UnderlyingNetworkSocketFactory(this));
                 Properties config = new Properties();
-                config.put("StrictHostKeyChecking", "yes");
+                config.put("StrictHostKeyChecking", profile.verifyHostKey ? "yes" : "no");
                 config.put("PreferredAuthentications", "publickey");
                 nextSession.setConfig(config);
                 nextSession.setServerAliveInterval(30000);
@@ -164,7 +170,7 @@ public final class TunnelService extends Service {
                 forwarders[profileIndex] = forwarder;
 
                 setProfileStatus(profileIndex,
-                        "listening on " + TunnelConfig.LOCAL_HOST + ":" + profile.localPort);
+                        "listening on " + profile.localHost + ":" + profile.localPort);
 
                 long nextHealthCheckAt = System.currentTimeMillis() + HEALTH_CHECK_INTERVAL_MS;
                 while (running.get() && nextSession.isConnected() && forwarder.isRunning()) {
@@ -191,9 +197,9 @@ public final class TunnelService extends Service {
     private void verifyForwardChannel(TunnelProfile profile, Session session) throws Exception {
         ChannelDirectTCPIP channel = (ChannelDirectTCPIP) session.openChannel("direct-tcpip");
         try {
-            channel.setHost(TunnelConfig.REMOTE_HOST);
-            channel.setPort(TunnelConfig.REMOTE_PORT);
-            channel.setOrgIPAddress(TunnelConfig.LOCAL_HOST);
+            channel.setHost(profile.remoteHost);
+            channel.setPort(profile.remotePort);
+            channel.setOrgIPAddress(profile.localHost);
             channel.setOrgPort(profile.localPort);
             channel.setInputStream(new ByteArrayInputStream(new byte[0]));
             channel.setOutputStream(new ByteArrayOutputStream());
@@ -227,7 +233,7 @@ public final class TunnelService extends Service {
         if (!running.get()) {
             return;
         }
-        Log.w(TAG, TunnelConfig.PROFILES[profileIndex].name + " reconnecting: " + reason);
+        Log.w(TAG, statusName(profileIndex) + " reconnecting: " + reason);
         setProfileStatus(profileIndex, "reconnecting: " + reason);
         disconnect(profileIndex);
     }
@@ -408,7 +414,7 @@ public final class TunnelService extends Service {
     }
 
     private synchronized void setProfileStatus(int profileIndex, String status) {
-        statuses[profileIndex] = TunnelConfig.PROFILES[profileIndex].name + ": " + status;
+        statuses[profileIndex] = statusName(profileIndex) + ": " + status;
         String summary = buildStatusSummary();
         updateStatus(summary);
         if (running.get()) {
@@ -441,15 +447,22 @@ public final class TunnelService extends Service {
 
     private String buildStatusSummary() {
         StringBuilder builder = new StringBuilder();
-        for (int i = 0; i < TunnelConfig.PROFILES.length; i++) {
+        for (int i = 0; i < profiles.length; i++) {
             if (i > 0) {
                 builder.append('\n');
             }
             builder.append(statuses[i] == null
-                    ? TunnelConfig.PROFILES[i].name + ": stopped"
+                    ? statusName(i) + ": stopped"
                     : statuses[i]);
         }
         return builder.toString();
+    }
+
+    private String statusName(int profileIndex) {
+        if (profileIndex >= 0 && profileIndex < profiles.length && profiles[profileIndex] != null) {
+            return profiles[profileIndex].sshHost;
+        }
+        return TunnelConfig.DEFAULT_SSH_HOST;
     }
 
     private void updateStatus(String status) {
@@ -516,7 +529,7 @@ public final class TunnelService extends Service {
             nextServerSocket.setReuseAddress(true);
             nextServerSocket.bind(
                     new InetSocketAddress(
-                            InetAddress.getByName(TunnelConfig.LOCAL_HOST),
+                            InetAddress.getByName(profile.localHost),
                             profile.localPort),
                     LOCAL_BACKLOG);
             serverSocket = nextServerSocket;
@@ -552,7 +565,7 @@ public final class TunnelService extends Service {
                     if (active > MAX_FORWARD_CONNECTIONS) {
                         activeConnections.decrementAndGet();
                         closeQuietly(socket);
-                        Log.w(TAG, profile.name
+                        Log.w(TAG, profile.sshHost
                                 + " rejected local connection: too many active channels ("
                                 + active + "/" + MAX_FORWARD_CONNECTIONS + ")");
                         continue;
@@ -561,12 +574,12 @@ public final class TunnelService extends Service {
                 }
             } catch (SocketException e) {
                 if (accepting.get() && running.get()) {
-                    Log.w(TAG, profile.name + " local listener stopped", e);
+                    Log.w(TAG, profile.sshHost + " local listener stopped", e);
                     setProfileStatus(profileIndex, "listener error: " + cleanMessage(e));
                 }
             } catch (IOException e) {
                 if (accepting.get() && running.get()) {
-                    Log.w(TAG, profile.name + " local listener failed", e);
+                    Log.w(TAG, profile.sshHost + " local listener failed", e);
                     setProfileStatus(profileIndex, "listener error: " + cleanMessage(e));
                 }
             } finally {
@@ -583,8 +596,8 @@ public final class TunnelService extends Service {
                 socket.setTcpNoDelay(true);
                 channel = (ChannelDirectTCPIP) session.openChannel("direct-tcpip");
                 activeChannels.add(channel);
-                channel.setHost(TunnelConfig.REMOTE_HOST);
-                channel.setPort(TunnelConfig.REMOTE_PORT);
+                channel.setHost(profile.remoteHost);
+                channel.setPort(profile.remotePort);
                 channel.setOrgIPAddress(socket.getInetAddress().getHostAddress());
                 channel.setOrgPort(socket.getPort());
                 channel.setInputStream(socket.getInputStream());
@@ -602,7 +615,7 @@ public final class TunnelService extends Service {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (Exception e) {
-                Log.w(TAG, profile.name + " forward failed", e);
+                Log.w(TAG, profile.sshHost + " forward failed", e);
                 if (!channelConnected && accepting.get() && running.get()) {
                     reconnectProfile(profileIndex, "forward channel failed: " + cleanMessage(e));
                 }
