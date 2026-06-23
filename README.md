@@ -13,15 +13,14 @@ for 151.
 
 - `TunnelService` runs as a foreground service and keeps the SSH tunnel alive.
 - `BootReceiver` starts the service on `BOOT_COMPLETED` and after APK replacement.
-- The `Autostart` button opens the MIUI/HyperOS autostart settings screen.
-- The `Battery` button opens battery optimization settings for the app.
+- The UI is intentionally limited to tunnel status plus `Start` and `Stop`.
 
 ## Device Setup
 
 Release APKs are built for this deployment and should work immediately after
-install. Development builds without local deployment assets generate credentials
-on the phone for local testing, but the app does not expose SSH key material in
-the UI.
+install. The deployment private key must be bundled as
+`app/src/main/assets-bundled/phone_tunnel_151_key`; the app does not generate
+fallback SSH keys on the phone.
 
 For this deployment the server-side account should be restricted to port
 forwarding only:

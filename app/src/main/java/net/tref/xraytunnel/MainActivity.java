@@ -2,16 +2,12 @@ package net.tref.xraytunnel;
 
 import android.Manifest;
 import android.app.Activity;
-import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.PowerManager;
-import android.provider.Settings;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -22,11 +18,9 @@ import android.widget.Toast;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_POST_NOTIFICATIONS = 1;
-    private static final String KEY_BATTERY_PROMPT_SHOWN = "battery_prompt_shown";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView statusView;
-    private String pendingBatteryAction;
     private String pendingNotificationAction;
 
     private final Runnable refreshStatus = new Runnable() {
@@ -88,20 +82,6 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        Button autostart = new Button(this);
-        autostart.setText("Autostart");
-        autostart.setOnClickListener(v -> openAutostartSettings());
-        root.addView(autostart, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        Button battery = new Button(this);
-        battery.setText("Battery");
-        battery.setOnClickListener(v -> openBatterySettings());
-        root.addView(battery, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-
         setContentView(scroll);
     }
 
@@ -109,11 +89,6 @@ public final class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         handler.post(refreshStatus);
-        if (pendingBatteryAction != null) {
-            String action = pendingBatteryAction;
-            pendingBatteryAction = null;
-            handler.post(() -> startTunnelService(action));
-        }
     }
 
     @Override
@@ -123,19 +98,6 @@ public final class MainActivity extends Activity {
     }
 
     private void startTunnelService(String action) {
-        if (TunnelService.ACTION_START.equals(action) && shouldShowBatteryOptimizationPrompt()) {
-            getSharedPreferences(TunnelService.PREFS, MODE_PRIVATE)
-                    .edit()
-                    .putBoolean(KEY_BATTERY_PROMPT_SHOWN, true)
-                    .apply();
-            pendingBatteryAction = action;
-            if (!openBatteryOptimizationSettings()) {
-                pendingBatteryAction = null;
-                startTunnelService(action);
-            }
-            return;
-        }
-
         if (shouldRequestNotifications()) {
             pendingNotificationAction = action;
             requestPermissions(
@@ -179,19 +141,6 @@ public final class MainActivity extends Activity {
                 != PackageManager.PERMISSION_GRANTED;
     }
 
-    private boolean shouldShowBatteryOptimizationPrompt() {
-        if (android.os.Build.VERSION.SDK_INT < 23) {
-            return false;
-        }
-        SharedPreferences prefs = getSharedPreferences(TunnelService.PREFS, MODE_PRIVATE);
-        if (prefs.getBoolean(KEY_BATTERY_PROMPT_SHOWN, false)) {
-            return false;
-        }
-        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
-        return powerManager != null
-                && !powerManager.isIgnoringBatteryOptimizations(getPackageName());
-    }
-
     private String buildConfigText() {
         StringBuilder builder = new StringBuilder();
         for (int i = 0; i < TunnelConfig.PROFILES.length; i++) {
@@ -212,57 +161,6 @@ public final class MainActivity extends Activity {
                     .append(TunnelConfig.REMOTE_PORT);
         }
         return builder.toString();
-    }
-
-    private void openAutostartSettings() {
-        Intent miuiAutostartAction = new Intent("miui.intent.action.OP_AUTO_START")
-                .setPackage("com.miui.securitycenter");
-
-        Intent miuiAutostart = new Intent()
-                .setComponent(new ComponentName(
-                        "com.miui.securitycenter",
-                        "com.miui.permcenter.autostart.AutoStartManagementActivity"));
-
-        Intent miuiPermissions = new Intent()
-                .setComponent(new ComponentName(
-                        "com.miui.securitycenter",
-                        "com.miui.permcenter.permissions.PermissionsEditorActivity"))
-                .putExtra("extra_pkgname", getPackageName());
-
-        Intent appSettings = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-                .setData(Uri.parse("package:" + getPackageName()));
-
-        if (!startFirstAvailable(miuiAutostartAction, miuiAutostart, miuiPermissions, appSettings)) {
-            Toast.makeText(this, "Autostart settings not available", Toast.LENGTH_LONG).show();
-        }
-    }
-
-    private void openBatterySettings() {
-        if (!openBatteryOptimizationSettings()) {
-            Toast.makeText(this, "Battery settings not available", Toast.LENGTH_LONG).show();
-        }
-    }
-
-    private boolean openBatteryOptimizationSettings() {
-        Intent requestIgnore = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-                .setData(Uri.parse("package:" + getPackageName()));
-        Intent batteryOptimization = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
-        Intent appSettings = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-                .setData(Uri.parse("package:" + getPackageName()));
-
-        return startFirstAvailable(requestIgnore, batteryOptimization, appSettings);
-    }
-
-    private boolean startFirstAvailable(Intent... intents) {
-        for (Intent intent : intents) {
-            try {
-                startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-                return true;
-            } catch (RuntimeException ignored) {
-                // Try the next vendor or platform settings screen.
-            }
-        }
-        return false;
     }
 
     private int dp(int value) {

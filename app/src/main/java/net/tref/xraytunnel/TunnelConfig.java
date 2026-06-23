@@ -12,8 +12,7 @@ final class TunnelConfig {
                     "151",
                     "151.245.140.102",
                     34443,
-                    "phone_tunnel_151_key",
-                    "phone_tunnel_151_key.pub")
+                    "phone_tunnel_151_key")
     };
 
     private TunnelConfig() {
