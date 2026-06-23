@@ -3,12 +3,11 @@
 Small Android helper app that keeps an SSH local port forward for v2rayNG:
 
 ```text
-127.0.0.1:24443 -> SSH 107.161.82.52 -> 127.0.0.1:443
 127.0.0.1:34443 -> SSH 151.245.140.102 -> 127.0.0.1:443
 ```
 
-v2rayNG then uses local VLESS/Reality profiles pointed at `127.0.0.1:24443`
-for 107 or `127.0.0.1:34443` for 151.
+v2rayNG then uses a local VLESS/Reality profile pointed at `127.0.0.1:34443`
+for 151.
 
 ## Runtime Behavior
 
@@ -28,12 +27,11 @@ For this deployment the server-side account should be restricted to port
 forwarding only:
 
 ```text
-xray-ssh-tunnel-107 -> 107.161.82.52
 xray-ssh-tunnel-151 -> 151.245.140.102
 ```
 
 ```text
-restrict,port-forwarding,permitopen="127.0.0.1:443",permitopen="localhost:443" ssh-rsa ... xray-ssh-tunnel-107
+restrict,port-forwarding,permitopen="127.0.0.1:443",permitopen="localhost:443" ssh-rsa ... xray-ssh-tunnel-151
 ```
 
 ## Build

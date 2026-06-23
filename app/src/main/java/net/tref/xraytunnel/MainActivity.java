@@ -144,6 +144,10 @@ public final class MainActivity extends Activity {
             return;
         }
         Intent intent = new Intent(this, TunnelService.class).setAction(action);
+        if (TunnelService.ACTION_STOP.equals(action)) {
+            startService(intent);
+            return;
+        }
         if (android.os.Build.VERSION.SDK_INT >= 26) {
             startForegroundService(intent);
         } else {
