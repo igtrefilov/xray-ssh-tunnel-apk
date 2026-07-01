@@ -16,4 +16,5 @@
     <string name="settings_saved">Settings saved. Restart tunnel to apply.</string>
     <string name="settings_reset_done">Default settings restored. Restart tunnel to apply.</string>
     <string name="notification_permission_required">Notification permission is required</string>
+    <string name="status_dot_description">VPS reachability</string>
 </resources>

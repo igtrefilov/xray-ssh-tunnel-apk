@@ -3,6 +3,7 @@ package net.tref.xraytunnel;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -15,6 +16,7 @@ import android.net.wifi.WifiManager;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.util.Log;
+import android.widget.RemoteViews;
 
 import com.jcraft.jsch.ChannelDirectTCPIP;
 import com.jcraft.jsch.JSch;
@@ -45,23 +47,36 @@ public final class TunnelService extends Service {
     public static final String ACTION_STOP = "net.tref.xraytunnel.STOP";
     public static final String PREFS = TunnelSettings.PREFS;
     public static final String KEY_STATUS = TunnelSettings.KEY_STATUS;
+    public static final String KEY_VPS_REACHABILITY = TunnelSettings.KEY_VPS_REACHABILITY;
+    public static final int REACHABILITY_UNKNOWN = TunnelSettings.REACHABILITY_UNKNOWN;
+    public static final int REACHABILITY_REACHABLE = TunnelSettings.REACHABILITY_REACHABLE;
+    public static final int REACHABILITY_UNREACHABLE = TunnelSettings.REACHABILITY_UNREACHABLE;
 
     private static final String TAG = "XrayTunnel";
     private static final String CHANNEL_ID = "tunnel";
     private static final int CHANNEL_CONNECT_TIMEOUT_MS = 10000;
+    private static final int VPS_PROBE_CONNECT_TIMEOUT_MS = 1000;
     private static final long HEALTH_CHECK_INTERVAL_MS = 60000;
+    private static final long VPS_PROBE_REACHABLE_INTERVAL_MS = 2000;
+    private static final long VPS_PROBE_UNREACHABLE_INTERVAL_MS = 500;
+    private static final long RETRY_WAIT_MS = 500;
     private static final int LOCAL_BACKLOG = 256;
     private static final int MAX_FORWARD_CONNECTIONS = 256;
 
     private final ExecutorService profileExecutor =
             Executors.newFixedThreadPool(TunnelConfig.PROFILE_COUNT);
     private final ExecutorService forwardExecutor = Executors.newCachedThreadPool();
+    private final ExecutorService reachabilityExecutor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean foregroundStarted = new AtomicBoolean(false);
+    private final AtomicBoolean reachabilityMonitorRunning = new AtomicBoolean(false);
+    private final AtomicInteger reachabilityState =
+            new AtomicInteger(TunnelSettings.REACHABILITY_UNKNOWN);
     private final Session[] sessions = new Session[TunnelConfig.PROFILE_COUNT];
     private final LocalForwarder[] forwarders = new LocalForwarder[TunnelConfig.PROFILE_COUNT];
     private final String[] statuses = new String[TunnelConfig.PROFILE_COUNT];
     private final Object networkLock = new Object();
+    private final Object reachabilitySignal = new Object();
 
     private TunnelProfile[] profiles = new TunnelProfile[] {
             TunnelSettings.defaultValues().toProfile()
@@ -93,6 +108,7 @@ public final class TunnelService extends Service {
         stopTunnel();
         profileExecutor.shutdownNow();
         forwardExecutor.shutdownNow();
+        reachabilityExecutor.shutdownNow();
         super.onDestroy();
     }
 
@@ -108,10 +124,12 @@ public final class TunnelService extends Service {
             return;
         }
         createNotificationChannel();
-        showForegroundNotification("connecting");
         profiles = TunnelSettings.profiles(this);
+        setReachabilityState(REACHABILITY_UNKNOWN, true);
+        showForegroundNotification("connecting");
         acquirePowerLocks();
         registerNetworkCallback();
+        startReachabilityMonitor();
         for (int i = 0; i < profiles.length; i++) {
             final int profileIndex = i;
             setProfileStatus(profileIndex, "connecting");
@@ -121,10 +139,12 @@ public final class TunnelService extends Service {
 
     private void stopTunnel() {
         running.set(false);
+        signalReachabilityMonitor();
         unregisterNetworkCallback();
         disconnectAll();
         releasePowerLocks();
         updateStatus("stopped");
+        setReachabilityState(REACHABILITY_UNKNOWN, true);
         stopForeground(true);
         foregroundStarted.set(false);
         stopSelf();
@@ -136,6 +156,9 @@ public final class TunnelService extends Service {
             Session nextSession = null;
             LocalForwarder forwarder = null;
             try {
+                if (!waitForReachableServer(profileIndex)) {
+                    continue;
+                }
                 setProfileStatus(profileIndex,
                         "connecting to " + profile.sshHost + ":" + profile.sshPort);
 
@@ -186,7 +209,7 @@ public final class TunnelService extends Service {
                 break;
             } catch (Exception e) {
                 setProfileStatus(profileIndex, "error: " + cleanMessage(e));
-                sleepBeforeRetry();
+                waitBeforeRetry();
             } finally {
                 disconnect(profileIndex);
             }
@@ -206,6 +229,95 @@ public final class TunnelService extends Service {
             channel.connect(CHANNEL_CONNECT_TIMEOUT_MS);
         } finally {
             channel.disconnect();
+        }
+    }
+
+    private void startReachabilityMonitor() {
+        if (!reachabilityMonitorRunning.compareAndSet(false, true)) {
+            return;
+        }
+        reachabilityExecutor.execute(this::runReachabilityMonitor);
+    }
+
+    private void runReachabilityMonitor() {
+        try {
+            while (running.get()) {
+                TunnelProfile profile = profiles.length == 0 ? null : profiles[0];
+                boolean reachable = profile != null && isVpsReachable(profile);
+                int previousState = reachabilityState.get();
+                int nextState = reachable
+                        ? REACHABILITY_REACHABLE
+                        : REACHABILITY_UNREACHABLE;
+                setReachabilityState(nextState, false);
+
+                if (!reachable) {
+                    disconnectAll();
+                } else if (previousState != REACHABILITY_REACHABLE) {
+                    signalReachabilityMonitor();
+                }
+
+                waitForNextReachabilityProbe(reachable
+                        ? VPS_PROBE_REACHABLE_INTERVAL_MS
+                        : VPS_PROBE_UNREACHABLE_INTERVAL_MS);
+            }
+        } finally {
+            reachabilityMonitorRunning.set(false);
+        }
+    }
+
+    private boolean isVpsReachable(TunnelProfile profile) {
+        Socket socket = null;
+        try {
+            socket = new UnderlyingNetworkSocketFactory(
+                    this,
+                    VPS_PROBE_CONNECT_TIMEOUT_MS,
+                    false)
+                    .createSocket(profile.sshHost, profile.sshPort);
+            return true;
+        } catch (IOException e) {
+            return false;
+        } finally {
+            closeQuietly(socket);
+        }
+    }
+
+    private boolean waitForReachableServer(int profileIndex) throws InterruptedException {
+        while (running.get()
+                && reachabilityState.get() != REACHABILITY_REACHABLE) {
+            String status = reachabilityState.get() == REACHABILITY_UNREACHABLE
+                    ? "waiting for VPS network"
+                    : "checking VPS network";
+            setProfileStatus(profileIndex, status);
+            waitOnReachabilitySignal(VPS_PROBE_UNREACHABLE_INTERVAL_MS);
+        }
+        return running.get();
+    }
+
+    private void waitBeforeRetry() {
+        try {
+            waitOnReachabilitySignal(RETRY_WAIT_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void waitForNextReachabilityProbe(long timeoutMs) {
+        try {
+            waitOnReachabilitySignal(timeoutMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void waitOnReachabilitySignal(long timeoutMs) throws InterruptedException {
+        synchronized (reachabilitySignal) {
+            reachabilitySignal.wait(timeoutMs);
+        }
+    }
+
+    private void signalReachabilityMonitor() {
+        synchronized (reachabilitySignal) {
+            reachabilitySignal.notifyAll();
         }
     }
 
@@ -248,16 +360,19 @@ public final class TunnelService extends Service {
         ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
             @Override
             public void onAvailable(Network network) {
+                signalReachabilityMonitor();
                 reconnectIfPreferredNetworkChanged();
             }
 
             @Override
             public void onLost(Network network) {
+                signalReachabilityMonitor();
                 reconnectIfPreferredNetworkChanged();
             }
 
             @Override
             public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
+                signalReachabilityMonitor();
                 reconnectIfPreferredNetworkChanged();
             }
         };
@@ -389,6 +504,7 @@ public final class TunnelService extends Service {
                 + describeNetwork(manager, nextNetwork)
                 + "; reconnecting SSH sessions");
         disconnectAll();
+        signalReachabilityMonitor();
     }
 
     private String describeNetwork(ConnectivityManager manager, Network network) {
@@ -398,19 +514,25 @@ public final class TunnelService extends Service {
         return UnderlyingNetworkSocketFactory.describeNetwork(manager, network);
     }
 
-    private void sleepBeforeRetry() {
-        try {
-            Thread.sleep(5000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
     private String cleanMessage(Exception e) {
         String message = e.getMessage();
         return message == null || message.trim().isEmpty()
                 ? e.getClass().getSimpleName()
                 : message;
+    }
+
+    private void setReachabilityState(int state, boolean force) {
+        int previous = reachabilityState.getAndSet(state);
+        if (!force && previous == state) {
+            return;
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putInt(KEY_VPS_REACHABILITY, state)
+                .apply();
+        if (running.get()) {
+            showForegroundNotification(buildStatusSummary().replace('\n', ' '));
+        }
     }
 
     private synchronized void setProfileStatus(int profileIndex, String status) {
@@ -488,12 +610,54 @@ public final class TunnelService extends Service {
         Notification.Builder builder = android.os.Build.VERSION.SDK_INT >= 26
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
-        return builder
-                .setContentTitle("Xray SSH Tunnel")
+
+        RemoteViews content = notificationContent(text);
+        builder
+                .setContentTitle(getString(R.string.app_name))
                 .setContentText(text)
+                .setContentIntent(contentIntent())
                 .setSmallIcon(android.R.drawable.stat_sys_upload_done)
-                .setOngoing(true)
-                .build();
+                .setOngoing(true);
+
+        if (android.os.Build.VERSION.SDK_INT >= 24) {
+            builder
+                    .setCustomContentView(content)
+                    .setCustomBigContentView(content)
+                    .setStyle(new Notification.DecoratedCustomViewStyle());
+            return builder.build();
+        }
+
+        Notification notification = builder.build();
+        notification.contentView = content;
+        return notification;
+    }
+
+    private RemoteViews notificationContent(String text) {
+        RemoteViews views = new RemoteViews(getPackageName(), R.layout.notification_tunnel);
+        views.setTextViewText(R.id.notification_title, getString(R.string.app_name));
+        views.setTextViewText(R.id.notification_status, text);
+        views.setImageViewResource(R.id.notification_dot, notificationDotDrawable());
+        return views;
+    }
+
+    private int notificationDotDrawable() {
+        int state = reachabilityState.get();
+        if (state == REACHABILITY_REACHABLE) {
+            return R.drawable.status_dot_green;
+        }
+        if (state == REACHABILITY_UNREACHABLE) {
+            return R.drawable.status_dot_red;
+        }
+        return R.drawable.status_dot_gray;
+    }
+
+    private PendingIntent contentIntent() {
+        Intent intent = new Intent(this, MainActivity.class);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (android.os.Build.VERSION.SDK_INT >= 23) {
+            flags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+        return PendingIntent.getActivity(this, 0, intent, flags);
     }
 
     private static void closeQuietly(Closeable closeable) {

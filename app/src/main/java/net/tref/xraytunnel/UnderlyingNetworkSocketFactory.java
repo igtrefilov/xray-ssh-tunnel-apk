@@ -20,12 +20,20 @@ import java.util.List;
 
 final class UnderlyingNetworkSocketFactory implements SocketFactory {
     private static final String TAG = "XrayTunnel";
-    private static final int CONNECT_TIMEOUT_MS = 15000;
+    private static final int DEFAULT_CONNECT_TIMEOUT_MS = 15000;
 
     private final Context context;
+    private final int connectTimeoutMs;
+    private final boolean logFailures;
 
     UnderlyingNetworkSocketFactory(Context context) {
+        this(context, DEFAULT_CONNECT_TIMEOUT_MS, true);
+    }
+
+    UnderlyingNetworkSocketFactory(Context context, int connectTimeoutMs, boolean logFailures) {
         this.context = context.getApplicationContext();
+        this.connectTimeoutMs = connectTimeoutMs;
+        this.logFailures = logFailures;
     }
 
     @Override
@@ -33,7 +41,7 @@ final class UnderlyingNetworkSocketFactory implements SocketFactory {
         ConnectivityManager manager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
         if (manager == null) {
             Socket socket = new Socket();
-            socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
+            socket.connect(new InetSocketAddress(host, port), connectTimeoutMs);
             return socket;
         }
 
@@ -44,7 +52,7 @@ final class UnderlyingNetworkSocketFactory implements SocketFactory {
             NetworkCapabilities caps = manager.getNetworkCapabilities(network);
             try {
                 socket = network.getSocketFactory().createSocket();
-                socket.connect(address, CONNECT_TIMEOUT_MS);
+                socket.connect(address, connectTimeoutMs);
                 return socket;
             } catch (IOException e) {
                 closeQuietly(socket);
@@ -53,7 +61,9 @@ final class UnderlyingNetworkSocketFactory implements SocketFactory {
                 } else {
                     failure.addSuppressed(e);
                 }
-                Log.w(TAG, "SSH connect via " + describeNetwork(caps, network) + " failed", e);
+                if (logFailures) {
+                    Log.w(TAG, "SSH connect via " + describeNetwork(caps, network) + " failed", e);
+                }
             }
         }
 
@@ -63,7 +73,7 @@ final class UnderlyingNetworkSocketFactory implements SocketFactory {
             Socket socket = null;
             try {
                 socket = new Socket();
-                socket.connect(address, CONNECT_TIMEOUT_MS);
+                socket.connect(address, connectTimeoutMs);
                 return socket;
             } catch (IOException e) {
                 closeQuietly(socket);
@@ -72,7 +82,9 @@ final class UnderlyingNetworkSocketFactory implements SocketFactory {
                 } else {
                     failure.addSuppressed(e);
                 }
-                Log.w(TAG, "SSH connect via default " + describeNetwork(activeCaps, activeNetwork) + " failed", e);
+                if (logFailures) {
+                    Log.w(TAG, "SSH connect via default " + describeNetwork(activeCaps, activeNetwork) + " failed", e);
+                }
             }
         }
 

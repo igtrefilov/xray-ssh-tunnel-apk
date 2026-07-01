@@ -5,11 +5,14 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -23,6 +26,7 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_POST_NOTIFICATIONS = 1;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private View statusDot;
     private TextView statusView;
     private EditText sshHostInput;
     private EditText sshUserInput;
@@ -39,6 +43,9 @@ public final class MainActivity extends Activity {
         public void run() {
             SharedPreferences prefs = getSharedPreferences(TunnelService.PREFS, MODE_PRIVATE);
             statusView.setText(prefs.getString(TunnelService.KEY_STATUS, "stopped"));
+            updateStatusDot(prefs.getInt(
+                    TunnelService.KEY_VPS_REACHABILITY,
+                    TunnelService.REACHABILITY_UNKNOWN));
             handler.postDelayed(this, 1000);
         }
     };
@@ -64,12 +71,25 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        statusView = new TextView(this);
-        statusView.setTextSize(16);
-        statusView.setPadding(0, dp(12), 0, dp(20));
-        root.addView(statusView, new LinearLayout.LayoutParams(
+        LinearLayout statusRow = new LinearLayout(this);
+        statusRow.setOrientation(LinearLayout.HORIZONTAL);
+        statusRow.setGravity(Gravity.CENTER_VERTICAL);
+        statusRow.setPadding(0, dp(12), 0, dp(20));
+        root.addView(statusRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        statusDot = new View(this);
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(12), dp(12));
+        dotParams.setMarginEnd(dp(10));
+        statusRow.addView(statusDot, dotParams);
+
+        statusView = new TextView(this);
+        statusView.setTextSize(16);
+        statusRow.addView(statusView, new LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1));
 
         Button start = new Button(this);
         start.setText(R.string.button_start);
@@ -282,6 +302,23 @@ public final class MainActivity extends Activity {
         return new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+
+    private void updateStatusDot(int reachability) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setShape(GradientDrawable.OVAL);
+        drawable.setColor(statusDotColor(reachability));
+        statusDot.setBackground(drawable);
+    }
+
+    private int statusDotColor(int reachability) {
+        if (reachability == TunnelService.REACHABILITY_REACHABLE) {
+            return Color.rgb(25, 135, 84);
+        }
+        if (reachability == TunnelService.REACHABILITY_UNREACHABLE) {
+            return Color.rgb(220, 53, 69);
+        }
+        return Color.rgb(138, 143, 152);
     }
 
     private int dp(int value) {

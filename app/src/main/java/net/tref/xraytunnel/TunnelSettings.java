@@ -6,6 +6,10 @@ import android.content.SharedPreferences;
 final class TunnelSettings {
     static final String PREFS = "tunnel";
     static final String KEY_STATUS = "status";
+    static final String KEY_VPS_REACHABILITY = "vps_reachability";
+    static final int REACHABILITY_UNKNOWN = 0;
+    static final int REACHABILITY_REACHABLE = 1;
+    static final int REACHABILITY_UNREACHABLE = 2;
 
     private static final String KEY_SSH_HOST = "ssh_host";
     private static final String KEY_SSH_USER = "ssh_user";
