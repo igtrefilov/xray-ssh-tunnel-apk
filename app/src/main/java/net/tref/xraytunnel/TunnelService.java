@@ -62,6 +62,12 @@ public final class TunnelService extends Service {
     private static final long RETRY_WAIT_MS = 500;
     private static final int LOCAL_BACKLOG = 256;
     private static final int MAX_FORWARD_CONNECTIONS = 256;
+    private static final String STATUS_CHECKING = "Checking";
+    private static final String STATUS_CONNECTING = "Connecting";
+    private static final String STATUS_OFFLINE = "Offline";
+    private static final String STATUS_ONLINE = "Online";
+    private static final String STATUS_RETRYING = "Retrying";
+    private static final String STATUS_STOPPED = "Stopped";
 
     private final ExecutorService profileExecutor =
             Executors.newFixedThreadPool(TunnelConfig.PROFILE_COUNT);
@@ -120,19 +126,19 @@ public final class TunnelService extends Service {
 
     private void startTunnel() {
         if (!running.compareAndSet(false, true)) {
-            updateStatus("running or connecting");
+            updateStatus(STATUS_CONNECTING);
             return;
         }
         createNotificationChannel();
         profiles = TunnelSettings.profiles(this);
         setReachabilityState(REACHABILITY_UNKNOWN, true);
-        showForegroundNotification("connecting");
+        showForegroundNotification(STATUS_CHECKING);
         acquirePowerLocks();
         registerNetworkCallback();
         startReachabilityMonitor();
         for (int i = 0; i < profiles.length; i++) {
             final int profileIndex = i;
-            setProfileStatus(profileIndex, "connecting");
+            setProfileStatus(profileIndex, STATUS_CHECKING);
             profileExecutor.execute(() -> runLoop(profileIndex));
         }
     }
@@ -143,7 +149,7 @@ public final class TunnelService extends Service {
         unregisterNetworkCallback();
         disconnectAll();
         releasePowerLocks();
-        updateStatus("stopped");
+        updateStatus(STATUS_STOPPED);
         setReachabilityState(REACHABILITY_UNKNOWN, true);
         stopForeground(true);
         foregroundStarted.set(false);
@@ -159,8 +165,7 @@ public final class TunnelService extends Service {
                 if (!waitForReachableServer(profileIndex)) {
                     continue;
                 }
-                setProfileStatus(profileIndex,
-                        "connecting to " + profile.sshHost + ":" + profile.sshPort);
+                setProfileStatus(profileIndex, STATUS_CONNECTING);
 
                 JSch jsch = new JSch();
                 jsch.addIdentity(
@@ -192,8 +197,7 @@ public final class TunnelService extends Service {
                 forwarder.start();
                 forwarders[profileIndex] = forwarder;
 
-                setProfileStatus(profileIndex,
-                        "listening on " + profile.localHost + ":" + profile.localPort);
+                setProfileStatus(profileIndex, STATUS_ONLINE);
 
                 long nextHealthCheckAt = System.currentTimeMillis() + HEALTH_CHECK_INTERVAL_MS;
                 while (running.get() && nextSession.isConnected() && forwarder.isRunning()) {
@@ -208,13 +212,14 @@ public final class TunnelService extends Service {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
-                setProfileStatus(profileIndex, "error: " + cleanMessage(e));
+                Log.w(TAG, statusName(profileIndex) + " tunnel error", e);
+                setProfileStatus(profileIndex, STATUS_RETRYING);
                 waitBeforeRetry();
             } finally {
                 disconnect(profileIndex);
             }
         }
-        setProfileStatus(profileIndex, "stopped");
+        setProfileStatus(profileIndex, STATUS_STOPPED);
     }
 
     private void verifyForwardChannel(TunnelProfile profile, Session session) throws Exception {
@@ -285,8 +290,8 @@ public final class TunnelService extends Service {
         while (running.get()
                 && reachabilityState.get() != REACHABILITY_REACHABLE) {
             String status = reachabilityState.get() == REACHABILITY_UNREACHABLE
-                    ? "waiting for VPS network"
-                    : "checking VPS network";
+                    ? STATUS_OFFLINE
+                    : STATUS_CHECKING;
             setProfileStatus(profileIndex, status);
             waitOnReachabilitySignal(VPS_PROBE_UNREACHABLE_INTERVAL_MS);
         }
@@ -346,7 +351,7 @@ public final class TunnelService extends Service {
             return;
         }
         Log.w(TAG, statusName(profileIndex) + " reconnecting: " + reason);
-        setProfileStatus(profileIndex, "reconnecting: " + reason);
+        setProfileStatus(profileIndex, STATUS_RETRYING);
         disconnect(profileIndex);
     }
 
@@ -514,13 +519,6 @@ public final class TunnelService extends Service {
         return UnderlyingNetworkSocketFactory.describeNetwork(manager, network);
     }
 
-    private String cleanMessage(Exception e) {
-        String message = e.getMessage();
-        return message == null || message.trim().isEmpty()
-                ? e.getClass().getSimpleName()
-                : message;
-    }
-
     private void setReachabilityState(int state, boolean force) {
         int previous = reachabilityState.getAndSet(state);
         if (!force && previous == state) {
@@ -531,16 +529,31 @@ public final class TunnelService extends Service {
                 .putInt(KEY_VPS_REACHABILITY, state)
                 .apply();
         if (running.get()) {
-            showForegroundNotification(buildStatusSummary().replace('\n', ' '));
+            if (state == REACHABILITY_UNREACHABLE) {
+                updateAllProfileStatuses(STATUS_OFFLINE);
+            } else if (state == REACHABILITY_REACHABLE
+                    && previous != REACHABILITY_REACHABLE) {
+                updateAllProfileStatuses(STATUS_CONNECTING);
+            } else if (state == REACHABILITY_UNKNOWN) {
+                updateAllProfileStatuses(STATUS_CHECKING);
+            }
+            showForegroundNotification(notificationStatusText());
         }
     }
 
+    private synchronized void updateAllProfileStatuses(String status) {
+        for (int i = 0; i < profiles.length; i++) {
+            statuses[i] = profileStatusText(i, status);
+        }
+        updateStatus(buildStatusSummary());
+    }
+
     private synchronized void setProfileStatus(int profileIndex, String status) {
-        statuses[profileIndex] = statusName(profileIndex) + ": " + status;
+        statuses[profileIndex] = profileStatusText(profileIndex, status);
         String summary = buildStatusSummary();
         updateStatus(summary);
         if (running.get()) {
-            showForegroundNotification(summary.replace('\n', ' '));
+            showForegroundNotification(notificationStatusText());
         }
     }
 
@@ -574,10 +587,21 @@ public final class TunnelService extends Service {
                 builder.append('\n');
             }
             builder.append(statuses[i] == null
-                    ? statusName(i) + ": stopped"
+                    ? profileStatusText(i, STATUS_STOPPED)
                     : statuses[i]);
         }
         return builder.toString();
+    }
+
+    private String notificationStatusText() {
+        return buildStatusSummary().replace('\n', ' ');
+    }
+
+    private String profileStatusText(int profileIndex, String status) {
+        if (profiles.length <= 1) {
+            return status;
+        }
+        return statusName(profileIndex) + ": " + status;
     }
 
     private String statusName(int profileIndex) {
@@ -616,7 +640,7 @@ public final class TunnelService extends Service {
                 .setContentTitle(getString(R.string.app_name))
                 .setContentText(text)
                 .setContentIntent(contentIntent())
-                .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+                .setSmallIcon(R.drawable.ic_notification_tunnel)
                 .setOngoing(true);
 
         if (android.os.Build.VERSION.SDK_INT >= 24) {
@@ -739,12 +763,12 @@ public final class TunnelService extends Service {
             } catch (SocketException e) {
                 if (accepting.get() && running.get()) {
                     Log.w(TAG, profile.sshHost + " local listener stopped", e);
-                    setProfileStatus(profileIndex, "listener error: " + cleanMessage(e));
+                    setProfileStatus(profileIndex, STATUS_RETRYING);
                 }
             } catch (IOException e) {
                 if (accepting.get() && running.get()) {
                     Log.w(TAG, profile.sshHost + " local listener failed", e);
-                    setProfileStatus(profileIndex, "listener error: " + cleanMessage(e));
+                    setProfileStatus(profileIndex, STATUS_RETRYING);
                 }
             } finally {
                 accepting.set(false);
@@ -781,7 +805,7 @@ public final class TunnelService extends Service {
             } catch (Exception e) {
                 Log.w(TAG, profile.sshHost + " forward failed", e);
                 if (!channelConnected && accepting.get() && running.get()) {
-                    reconnectProfile(profileIndex, "forward channel failed: " + cleanMessage(e));
+                    reconnectProfile(profileIndex, "forward channel failed");
                 }
             } finally {
                 if (channel != null) {

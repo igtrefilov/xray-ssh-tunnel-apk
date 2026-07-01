@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
@@ -24,10 +25,22 @@ import android.widget.Toast;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_POST_NOTIFICATIONS = 1;
+    private static final int COLOR_BACKGROUND = 0xFFF4F6F8;
+    private static final int COLOR_SURFACE = 0xFFFFFFFF;
+    private static final int COLOR_TEXT = 0xFF171A1F;
+    private static final int COLOR_MUTED = 0xFF6F7682;
+    private static final int COLOR_BORDER = 0xFFE1E5EA;
+    private static final int COLOR_PRIMARY = 0xFF171A1F;
+    private static final int COLOR_GREEN = 0xFF198754;
+    private static final int COLOR_RED = 0xFFDC3545;
+    private static final int COLOR_GRAY = 0xFF8A8F98;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private View statusDot;
     private TextView statusView;
+    private TextView statusDetailView;
+    private Button settingsToggle;
+    private LinearLayout settingsPanel;
     private EditText sshHostInput;
     private EditText sshUserInput;
     private EditText sshPortInput;
@@ -42,7 +55,7 @@ public final class MainActivity extends Activity {
         @Override
         public void run() {
             SharedPreferences prefs = getSharedPreferences(TunnelService.PREFS, MODE_PRIVATE);
-            statusView.setText(prefs.getString(TunnelService.KEY_STATUS, "stopped"));
+            statusView.setText(prefs.getString(TunnelService.KEY_STATUS, "Stopped"));
             updateStatusDot(prefs.getInt(
                     TunnelService.KEY_VPS_REACHABILITY,
                     TunnelService.REACHABILITY_UNKNOWN));
@@ -55,55 +68,97 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
 
         ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundColor(COLOR_BACKGROUND);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER_HORIZONTAL);
-        int pad = dp(20);
-        root.setPadding(pad, pad, pad, pad);
+        int pad = dp(18);
+        root.setPadding(pad, dp(34), pad, pad);
         scroll.addView(root, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(header, fullWidthWrapContent());
+
         TextView title = new TextView(this);
         title.setText(R.string.app_name);
         title.setTextSize(22);
-        root.addView(title, new LinearLayout.LayoutParams(
+        title.setTextColor(COLOR_TEXT);
+        header.addView(title, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1));
+
+        TextView version = new TextView(this);
+        version.setText(versionText());
+        version.setTextSize(13);
+        version.setTextColor(COLOR_MUTED);
+        version.setPadding(0, dp(2), 0, 0);
+        root.addView(version, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout statusPanel = new LinearLayout(this);
+        statusPanel.setOrientation(LinearLayout.VERTICAL);
+        statusPanel.setPadding(dp(16), dp(14), dp(16), dp(14));
+        statusPanel.setBackground(roundRect(COLOR_SURFACE, COLOR_BORDER, 1, 8));
+        LinearLayout.LayoutParams statusPanelParams = fullWidthWrapContent();
+        statusPanelParams.setMargins(0, dp(16), 0, dp(12));
+        root.addView(statusPanel, statusPanelParams);
 
         LinearLayout statusRow = new LinearLayout(this);
         statusRow.setOrientation(LinearLayout.HORIZONTAL);
         statusRow.setGravity(Gravity.CENTER_VERTICAL);
-        statusRow.setPadding(0, dp(12), 0, dp(20));
-        root.addView(statusRow, new LinearLayout.LayoutParams(
+        statusPanel.addView(statusRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         statusDot = new View(this);
-        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(12), dp(12));
-        dotParams.setMarginEnd(dp(10));
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(14), dp(14));
+        dotParams.setMarginEnd(dp(12));
         statusRow.addView(statusDot, dotParams);
 
         statusView = new TextView(this);
-        statusView.setTextSize(16);
+        statusView.setTextSize(24);
+        statusView.setTextColor(COLOR_TEXT);
         statusRow.addView(statusView, new LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 1));
 
-        Button start = new Button(this);
-        start.setText(R.string.button_start);
-        start.setOnClickListener(v -> startTunnelService(TunnelService.ACTION_START));
-        root.addView(start, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
+        TunnelSettings.Values values = TunnelSettings.loadValues(this);
+        statusDetailView = new TextView(this);
+        statusDetailView.setText(values.localHost + ":" + values.localPort);
+        statusDetailView.setTextSize(13);
+        statusDetailView.setTextColor(COLOR_MUTED);
+        statusDetailView.setPadding(dp(26), dp(4), 0, 0);
+        statusPanel.addView(statusDetailView, fullWidthWrapContent());
 
-        Button stop = new Button(this);
-        stop.setText(R.string.button_stop);
+        LinearLayout actionRow = new LinearLayout(this);
+        actionRow.setOrientation(LinearLayout.HORIZONTAL);
+        actionRow.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(actionRow, fullWidthWrapContent());
+
+        Button start = styledButton(R.string.button_start, COLOR_GREEN, Color.WHITE, COLOR_GREEN);
+        start.setOnClickListener(v -> startTunnelService(TunnelService.ACTION_START));
+        LinearLayout.LayoutParams startParams = new LinearLayout.LayoutParams(
+                0,
+                dp(48),
+                1);
+        startParams.setMarginEnd(dp(8));
+        actionRow.addView(start, startParams);
+
+        Button stop = styledButton(R.string.button_stop, Color.TRANSPARENT, COLOR_RED, COLOR_RED);
         stop.setOnClickListener(v -> startTunnelService(TunnelService.ACTION_STOP));
-        root.addView(stop, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams stopParams = new LinearLayout.LayoutParams(
+                0,
+                dp(48),
+                1);
+        stopParams.setMarginStart(dp(8));
+        actionRow.addView(stop, stopParams);
 
         addSettingsSection(root);
 
@@ -169,46 +224,75 @@ public final class MainActivity extends Activity {
     private void addSettingsSection(LinearLayout root) {
         TunnelSettings.Values values = TunnelSettings.loadValues(this);
 
-        TextView settingsTitle = new TextView(this);
-        settingsTitle.setText(R.string.settings_title);
-        settingsTitle.setTextSize(18);
-        settingsTitle.setPadding(0, dp(24), 0, dp(8));
-        root.addView(settingsTitle, fullWidthWrapContent());
+        settingsToggle = styledButton(
+                R.string.settings_title,
+                Color.TRANSPARENT,
+                COLOR_PRIMARY,
+                COLOR_BORDER);
+        settingsToggle.setOnClickListener(v -> toggleSettings());
+        LinearLayout.LayoutParams toggleParams = fullWidthWrapContent();
+        toggleParams.setMargins(0, dp(12), 0, 0);
+        root.addView(settingsToggle, toggleParams);
 
-        sshHostInput = addTextInput(root, R.string.settings_vps_ip, values.sshHost, textInputType());
-        sshUserInput = addTextInput(root, R.string.settings_ssh_user, values.sshUser, textInputType());
+        settingsPanel = new LinearLayout(this);
+        settingsPanel.setOrientation(LinearLayout.VERTICAL);
+        settingsPanel.setPadding(dp(14), dp(12), dp(14), dp(14));
+        settingsPanel.setBackground(roundRect(COLOR_SURFACE, COLOR_BORDER, 1, 8));
+        settingsPanel.setVisibility(View.GONE);
+        LinearLayout.LayoutParams panelParams = fullWidthWrapContent();
+        panelParams.setMargins(0, dp(10), 0, 0);
+        root.addView(settingsPanel, panelParams);
+
+        sshHostInput = addTextInput(settingsPanel, R.string.settings_vps_ip, values.sshHost, textInputType());
+        sshUserInput = addTextInput(settingsPanel, R.string.settings_ssh_user, values.sshUser, textInputType());
         sshPortInput = addTextInput(
-                root,
+                settingsPanel,
                 R.string.settings_ssh_port,
                 String.valueOf(values.sshPort),
                 portInputType());
-        localHostInput = addTextInput(root, R.string.settings_listen_ip, values.localHost, textInputType());
+        localHostInput = addTextInput(settingsPanel, R.string.settings_listen_ip, values.localHost, textInputType());
         localPortInput = addTextInput(
-                root,
+                settingsPanel,
                 R.string.settings_listen_port,
                 String.valueOf(values.localPort),
                 portInputType());
-        remoteHostInput = addTextInput(root, R.string.settings_target_ip, values.remoteHost, textInputType());
+        remoteHostInput = addTextInput(settingsPanel, R.string.settings_target_ip, values.remoteHost, textInputType());
         remotePortInput = addTextInput(
-                root,
+                settingsPanel,
                 R.string.settings_target_port,
                 String.valueOf(values.remotePort),
                 portInputType());
 
         verifyHostKeyInput = new CheckBox(this);
         verifyHostKeyInput.setText(R.string.settings_verify_host_key);
+        verifyHostKeyInput.setTextColor(COLOR_TEXT);
         verifyHostKeyInput.setChecked(values.verifyHostKey);
-        root.addView(verifyHostKeyInput, fullWidthWrapContent());
+        settingsPanel.addView(verifyHostKeyInput, fullWidthWrapContent());
 
-        Button save = new Button(this);
-        save.setText(R.string.settings_save);
+        LinearLayout settingsActions = new LinearLayout(this);
+        settingsActions.setOrientation(LinearLayout.HORIZONTAL);
+        settingsActions.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams settingsActionsParams = fullWidthWrapContent();
+        settingsActionsParams.setMargins(0, dp(10), 0, 0);
+        settingsPanel.addView(settingsActions, settingsActionsParams);
+
+        Button save = styledButton(R.string.settings_save, COLOR_PRIMARY, Color.WHITE, COLOR_PRIMARY);
         save.setOnClickListener(v -> saveSettings());
-        root.addView(save, fullWidthWrapContent());
+        LinearLayout.LayoutParams saveParams = new LinearLayout.LayoutParams(
+                0,
+                dp(44),
+                1);
+        saveParams.setMarginEnd(dp(8));
+        settingsActions.addView(save, saveParams);
 
-        Button reset = new Button(this);
-        reset.setText(R.string.settings_reset);
+        Button reset = styledButton(R.string.settings_reset, Color.TRANSPARENT, COLOR_MUTED, COLOR_BORDER);
         reset.setOnClickListener(v -> resetSettings());
-        root.addView(reset, fullWidthWrapContent());
+        LinearLayout.LayoutParams resetParams = new LinearLayout.LayoutParams(
+                0,
+                dp(44),
+                1);
+        resetParams.setMarginStart(dp(8));
+        settingsActions.addView(reset, resetParams);
     }
 
     private EditText addTextInput(
@@ -219,20 +303,29 @@ public final class MainActivity extends Activity {
         TextView labelView = new TextView(this);
         labelView.setText(labelResId);
         labelView.setTextSize(12);
-        labelView.setPadding(0, dp(8), 0, 0);
+        labelView.setTextColor(COLOR_MUTED);
+        labelView.setPadding(0, dp(8), 0, dp(2));
         root.addView(labelView, fullWidthWrapContent());
 
         EditText input = new EditText(this);
         input.setSingleLine(true);
         input.setText(value);
+        input.setTextColor(COLOR_TEXT);
+        input.setTextSize(15);
         input.setInputType(inputType);
-        root.addView(input, fullWidthWrapContent());
+        input.setPadding(dp(10), 0, dp(10), 0);
+        input.setBackground(roundRect(0xFFF8FAFC, COLOR_BORDER, 1, 6));
+        root.addView(input, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(42)));
         return input;
     }
 
     private void saveSettings() {
         try {
-            TunnelSettings.saveValues(this, readSettingsFromInputs());
+            TunnelSettings.Values values = readSettingsFromInputs();
+            TunnelSettings.saveValues(this, values);
+            statusDetailView.setText(values.localHost + ":" + values.localPort);
             Toast.makeText(this, R.string.settings_saved, Toast.LENGTH_LONG).show();
         } catch (IllegalArgumentException e) {
             Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show();
@@ -267,12 +360,13 @@ public final class MainActivity extends Activity {
         remoteHostInput.setText(values.remoteHost);
         remotePortInput.setText(String.valueOf(values.remotePort));
         verifyHostKeyInput.setChecked(values.verifyHostKey);
+        statusDetailView.setText(values.localHost + ":" + values.localPort);
     }
 
     private String requiredText(EditText input, String label) {
         String value = input.getText().toString().trim();
         if (value.isEmpty()) {
-            throw new IllegalArgumentException(label + " is required");
+            throw new IllegalArgumentException(label + " required");
         }
         return value;
     }
@@ -287,7 +381,7 @@ public final class MainActivity extends Activity {
         } catch (NumberFormatException ignored) {
             // Fall through to a single validation message.
         }
-        throw new IllegalArgumentException(label + " must be 1-65535");
+        throw new IllegalArgumentException(label + ": 1-65535");
     }
 
     private int textInputType() {
@@ -304,6 +398,36 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT);
     }
 
+    private void toggleSettings() {
+        boolean show = settingsPanel.getVisibility() != View.VISIBLE;
+        settingsPanel.setVisibility(show ? View.VISIBLE : View.GONE);
+        settingsToggle.setText(show ? R.string.settings_hide : R.string.settings_title);
+    }
+
+    private Button styledButton(int textResId, int backgroundColor, int textColor, int strokeColor) {
+        Button button = new Button(this);
+        button.setText(textResId);
+        button.setAllCaps(false);
+        button.setTextColor(textColor);
+        button.setTextSize(15);
+        button.setMinHeight(0);
+        button.setMinWidth(0);
+        button.setPadding(dp(12), 0, dp(12), 0);
+        button.setBackground(roundRect(backgroundColor, strokeColor, 1, 8));
+        return button;
+    }
+
+    private GradientDrawable roundRect(int fillColor, int strokeColor, int strokeDp, int radiusDp) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setShape(GradientDrawable.RECTANGLE);
+        drawable.setColor(fillColor);
+        drawable.setCornerRadius(dp(radiusDp));
+        if (strokeDp > 0) {
+            drawable.setStroke(dp(strokeDp), strokeColor);
+        }
+        return drawable;
+    }
+
     private void updateStatusDot(int reachability) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setShape(GradientDrawable.OVAL);
@@ -313,12 +437,21 @@ public final class MainActivity extends Activity {
 
     private int statusDotColor(int reachability) {
         if (reachability == TunnelService.REACHABILITY_REACHABLE) {
-            return Color.rgb(25, 135, 84);
+            return COLOR_GREEN;
         }
         if (reachability == TunnelService.REACHABILITY_UNREACHABLE) {
-            return Color.rgb(220, 53, 69);
+            return COLOR_RED;
         }
-        return Color.rgb(138, 143, 152);
+        return COLOR_GRAY;
+    }
+
+    private String versionText() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return info.versionName == null ? "" : "Version " + info.versionName;
+        } catch (PackageManager.NameNotFoundException e) {
+            return "";
+        }
     }
 
     private int dp(int value) {

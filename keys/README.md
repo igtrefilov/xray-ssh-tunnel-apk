@@ -3,6 +3,16 @@
 Private SSH keys in this directory are local deployment material and must not be
 committed.
 
+Release signing material is also kept here locally:
+
+```text
+keys/xray-ssh-tunnel-release.p12
+keys/xray-ssh-tunnel-release.pass
+```
+
+These files are ignored by git. The release certificate must match the GitHub
+release APKs from v1.5 onward.
+
 For a fresh deployment, generate a key and copy it into the Android assets:
 
 ```bash
