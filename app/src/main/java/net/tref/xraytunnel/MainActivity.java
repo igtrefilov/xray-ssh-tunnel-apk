@@ -33,6 +33,7 @@ public final class MainActivity extends Activity {
     private static final int COLOR_PRIMARY = 0xFF171A1F;
     private static final int COLOR_GREEN = 0xFF198754;
     private static final int COLOR_RED = 0xFFDC3545;
+    private static final int COLOR_YELLOW = 0xFFFFC107;
     private static final int COLOR_GRAY = 0xFF8A8F98;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -441,6 +442,9 @@ public final class MainActivity extends Activity {
         }
         if (reachability == TunnelService.REACHABILITY_UNREACHABLE) {
             return COLOR_RED;
+        }
+        if (reachability == TunnelService.REACHABILITY_DEGRADED) {
+            return COLOR_YELLOW;
         }
         return COLOR_GRAY;
     }

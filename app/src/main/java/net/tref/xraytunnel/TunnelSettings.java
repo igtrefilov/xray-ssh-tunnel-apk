@@ -10,6 +10,7 @@ final class TunnelSettings {
     static final int REACHABILITY_UNKNOWN = 0;
     static final int REACHABILITY_REACHABLE = 1;
     static final int REACHABILITY_UNREACHABLE = 2;
+    static final int REACHABILITY_DEGRADED = 3;
 
     private static final String KEY_SSH_HOST = "ssh_host";
     private static final String KEY_SSH_USER = "ssh_user";

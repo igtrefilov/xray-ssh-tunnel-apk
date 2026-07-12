@@ -37,8 +37,10 @@ import java.util.HashSet;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -51,36 +53,43 @@ public final class TunnelService extends Service {
     public static final int REACHABILITY_UNKNOWN = TunnelSettings.REACHABILITY_UNKNOWN;
     public static final int REACHABILITY_REACHABLE = TunnelSettings.REACHABILITY_REACHABLE;
     public static final int REACHABILITY_UNREACHABLE = TunnelSettings.REACHABILITY_UNREACHABLE;
+    public static final int REACHABILITY_DEGRADED = TunnelSettings.REACHABILITY_DEGRADED;
 
     private static final String TAG = "XrayTunnel";
     private static final String CHANNEL_ID = "tunnel";
-    private static final int CHANNEL_CONNECT_TIMEOUT_MS = 10000;
+    private static final int CHANNEL_CONNECT_TIMEOUT_MS = 1000;
     private static final int VPS_PROBE_CONNECT_TIMEOUT_MS = 1000;
-    private static final long HEALTH_CHECK_INTERVAL_MS = 60000;
-    private static final long VPS_PROBE_REACHABLE_INTERVAL_MS = 2000;
-    private static final long VPS_PROBE_UNREACHABLE_INTERVAL_MS = 500;
+    private static final int INTERNET_PROBE_CONNECT_TIMEOUT_MS = 1000;
+    private static final long HEALTH_CHECK_INTERVAL_MS = 1000;
+    private static final long DIAGNOSTIC_PROBE_INTERVAL_MS = 1000;
+    private static final long DIAGNOSTIC_PROBE_WAIT_MS = 1200;
     private static final long RETRY_WAIT_MS = 500;
     private static final int LOCAL_BACKLOG = 256;
     private static final int MAX_FORWARD_CONNECTIONS = 256;
-    private static final String STATUS_CHECKING = "Checking";
-    private static final String STATUS_CONNECTING = "Connecting";
+    private static final String STATUS_TUNNEL_DOWN = "Tunnel Down";
+    private static final String STATUS_VPS_DOWN = "VPS Down";
+    private static final String STATUS_CHEBURNET = "Cheburnet";
     private static final String STATUS_OFFLINE = "Offline";
     private static final String STATUS_ONLINE = "Online";
-    private static final String STATUS_RETRYING = "Retrying";
     private static final String STATUS_STOPPED = "Stopped";
+    private static final String YA_HOST = "ya.ru";
+    private static final String GOOGLE_HOST = "google.com";
+    private static final int HTTPS_PORT = 443;
 
     private final ExecutorService profileExecutor =
             Executors.newFixedThreadPool(TunnelConfig.PROFILE_COUNT);
     private final ExecutorService forwardExecutor = Executors.newCachedThreadPool();
     private final ExecutorService reachabilityExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService diagnosticProbeExecutor = Executors.newFixedThreadPool(3);
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean foregroundStarted = new AtomicBoolean(false);
     private final AtomicBoolean reachabilityMonitorRunning = new AtomicBoolean(false);
+    private final AtomicBoolean tunnelOnline = new AtomicBoolean(false);
+    private final AtomicBoolean vpsReachable = new AtomicBoolean(false);
     private final AtomicInteger reachabilityState =
             new AtomicInteger(TunnelSettings.REACHABILITY_UNKNOWN);
     private final Session[] sessions = new Session[TunnelConfig.PROFILE_COUNT];
     private final LocalForwarder[] forwarders = new LocalForwarder[TunnelConfig.PROFILE_COUNT];
-    private final String[] statuses = new String[TunnelConfig.PROFILE_COUNT];
     private final Object networkLock = new Object();
     private final Object reachabilitySignal = new Object();
 
@@ -115,6 +124,7 @@ public final class TunnelService extends Service {
         profileExecutor.shutdownNow();
         forwardExecutor.shutdownNow();
         reachabilityExecutor.shutdownNow();
+        diagnosticProbeExecutor.shutdownNow();
         super.onDestroy();
     }
 
@@ -126,31 +136,31 @@ public final class TunnelService extends Service {
 
     private void startTunnel() {
         if (!running.compareAndSet(false, true)) {
-            updateStatus(STATUS_CONNECTING);
             return;
         }
         createNotificationChannel();
         profiles = TunnelSettings.profiles(this);
         setReachabilityState(REACHABILITY_UNKNOWN, true);
-        showForegroundNotification(STATUS_CHECKING);
+        updateConnectionStatus(STATUS_OFFLINE, REACHABILITY_UNKNOWN);
+        showForegroundNotification(STATUS_OFFLINE);
         acquirePowerLocks();
         registerNetworkCallback();
         startReachabilityMonitor();
         for (int i = 0; i < profiles.length; i++) {
             final int profileIndex = i;
-            setProfileStatus(profileIndex, STATUS_CHECKING);
             profileExecutor.execute(() -> runLoop(profileIndex));
         }
     }
 
     private void stopTunnel() {
         running.set(false);
+        tunnelOnline.set(false);
+        vpsReachable.set(false);
         signalReachabilityMonitor();
         unregisterNetworkCallback();
         disconnectAll();
         releasePowerLocks();
-        updateStatus(STATUS_STOPPED);
-        setReachabilityState(REACHABILITY_UNKNOWN, true);
+        updateConnectionStatus(STATUS_STOPPED, REACHABILITY_UNKNOWN);
         stopForeground(true);
         foregroundStarted.set(false);
         stopSelf();
@@ -165,8 +175,6 @@ public final class TunnelService extends Service {
                 if (!waitForReachableServer(profileIndex)) {
                     continue;
                 }
-                setProfileStatus(profileIndex, STATUS_CONNECTING);
-
                 JSch jsch = new JSch();
                 jsch.addIdentity(
                         profile.sshHost + "-bundled",
@@ -188,8 +196,8 @@ public final class TunnelService extends Service {
                 config.put("StrictHostKeyChecking", profile.verifyHostKey ? "yes" : "no");
                 config.put("PreferredAuthentications", "publickey");
                 nextSession.setConfig(config);
-                nextSession.setServerAliveInterval(30000);
-                nextSession.setServerAliveCountMax(3);
+                nextSession.setServerAliveInterval(1000);
+                nextSession.setServerAliveCountMax(1);
                 nextSession.connect(15000);
                 sessions[profileIndex] = nextSession;
 
@@ -197,29 +205,27 @@ public final class TunnelService extends Service {
                 forwarder.start();
                 forwarders[profileIndex] = forwarder;
 
-                setProfileStatus(profileIndex, STATUS_ONLINE);
+                verifyForwardChannel(profile, nextSession);
+                markTunnelOnline();
 
-                long nextHealthCheckAt = System.currentTimeMillis() + HEALTH_CHECK_INTERVAL_MS;
                 while (running.get() && nextSession.isConnected() && forwarder.isRunning()) {
-                    Thread.sleep(2000);
-                    long now = System.currentTimeMillis();
-                    if (now >= nextHealthCheckAt) {
-                        verifyForwardChannel(profile, nextSession);
-                        nextHealthCheckAt = now + HEALTH_CHECK_INTERVAL_MS;
-                    }
+                    verifyForwardChannel(profile, nextSession);
+                    Thread.sleep(HEALTH_CHECK_INTERVAL_MS);
+                }
+                if (running.get()) {
+                    markTunnelUnavailable();
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
                 Log.w(TAG, statusName(profileIndex) + " tunnel error", e);
-                setProfileStatus(profileIndex, STATUS_RETRYING);
+                markTunnelUnavailable();
                 waitBeforeRetry();
             } finally {
                 disconnect(profileIndex);
             }
         }
-        setProfileStatus(profileIndex, STATUS_STOPPED);
     }
 
     private void verifyForwardChannel(TunnelProfile profile, Session session) throws Exception {
@@ -247,37 +253,29 @@ public final class TunnelService extends Service {
     private void runReachabilityMonitor() {
         try {
             while (running.get()) {
-                TunnelProfile profile = profiles.length == 0 ? null : profiles[0];
-                boolean reachable = profile != null && isVpsReachable(profile);
-                int previousState = reachabilityState.get();
-                int nextState = reachable
-                        ? REACHABILITY_REACHABLE
-                        : REACHABILITY_UNREACHABLE;
-                setReachabilityState(nextState, false);
-
-                if (!reachable) {
-                    disconnectAll();
-                } else if (previousState != REACHABILITY_REACHABLE) {
-                    signalReachabilityMonitor();
+                if (tunnelOnline.get()) {
+                    waitForNextReachabilityProbe(DIAGNOSTIC_PROBE_INTERVAL_MS);
+                    continue;
                 }
-
-                waitForNextReachabilityProbe(reachable
-                        ? VPS_PROBE_REACHABLE_INTERVAL_MS
-                        : VPS_PROBE_UNREACHABLE_INTERVAL_MS);
+                TunnelProfile profile = profiles.length == 0 ? null : profiles[0];
+                if (profile != null) {
+                    updateDiagnosticStatus(probeConnectivity(profile));
+                }
+                waitForNextReachabilityProbe(DIAGNOSTIC_PROBE_INTERVAL_MS);
             }
         } finally {
             reachabilityMonitorRunning.set(false);
         }
     }
 
-    private boolean isVpsReachable(TunnelProfile profile) {
+    private boolean isReachable(String host, int port, int timeoutMs) {
         Socket socket = null;
         try {
             socket = new UnderlyingNetworkSocketFactory(
                     this,
-                    VPS_PROBE_CONNECT_TIMEOUT_MS,
+                    timeoutMs,
                     false)
-                    .createSocket(profile.sshHost, profile.sshPort);
+                    .createSocket(host, port);
             return true;
         } catch (IOException e) {
             return false;
@@ -286,14 +284,77 @@ public final class TunnelService extends Service {
         }
     }
 
+    private DiagnosticResult probeConnectivity(TunnelProfile profile) {
+        AtomicBoolean vps = new AtomicBoolean(false);
+        AtomicBoolean ya = new AtomicBoolean(false);
+        AtomicBoolean google = new AtomicBoolean(false);
+        CountDownLatch completed = new CountDownLatch(3);
+
+        diagnosticProbeExecutor.execute(() -> {
+            vps.set(isReachable(profile.sshHost, profile.sshPort, VPS_PROBE_CONNECT_TIMEOUT_MS));
+            completed.countDown();
+        });
+        diagnosticProbeExecutor.execute(() -> {
+            ya.set(isReachable(YA_HOST, HTTPS_PORT, INTERNET_PROBE_CONNECT_TIMEOUT_MS));
+            completed.countDown();
+        });
+        diagnosticProbeExecutor.execute(() -> {
+            google.set(isReachable(GOOGLE_HOST, HTTPS_PORT, INTERNET_PROBE_CONNECT_TIMEOUT_MS));
+            completed.countDown();
+        });
+
+        try {
+            completed.await(DIAGNOSTIC_PROBE_WAIT_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return new DiagnosticResult(vps.get(), ya.get(), google.get());
+    }
+
+    private void updateDiagnosticStatus(DiagnosticResult result) {
+        if (!running.get() || tunnelOnline.get()) {
+            return;
+        }
+        vpsReachable.set(result.vpsReachable);
+        if (result.vpsReachable) {
+            updateConnectionStatus(STATUS_TUNNEL_DOWN, REACHABILITY_UNREACHABLE);
+            signalReachabilityMonitor();
+            return;
+        }
+        if (result.yaReachable && result.googleReachable) {
+            updateConnectionStatus(STATUS_VPS_DOWN, REACHABILITY_UNREACHABLE);
+            return;
+        }
+        if (result.yaReachable && !result.googleReachable) {
+            updateConnectionStatus(STATUS_CHEBURNET, REACHABILITY_DEGRADED);
+            return;
+        }
+        if (!result.yaReachable && result.googleReachable) {
+            updateConnectionStatus(STATUS_VPS_DOWN, REACHABILITY_UNREACHABLE);
+            return;
+        }
+        updateConnectionStatus(STATUS_OFFLINE, REACHABILITY_UNKNOWN);
+    }
+
+    private void markTunnelOnline() {
+        vpsReachable.set(true);
+        tunnelOnline.set(true);
+        updateConnectionStatus(STATUS_ONLINE, REACHABILITY_REACHABLE);
+        signalReachabilityMonitor();
+    }
+
+    private void markTunnelUnavailable() {
+        if (!running.get()) {
+            return;
+        }
+        tunnelOnline.set(false);
+        signalReachabilityMonitor();
+    }
+
     private boolean waitForReachableServer(int profileIndex) throws InterruptedException {
         while (running.get()
-                && reachabilityState.get() != REACHABILITY_REACHABLE) {
-            String status = reachabilityState.get() == REACHABILITY_UNREACHABLE
-                    ? STATUS_OFFLINE
-                    : STATUS_CHECKING;
-            setProfileStatus(profileIndex, status);
-            waitOnReachabilitySignal(VPS_PROBE_UNREACHABLE_INTERVAL_MS);
+                && !vpsReachable.get()) {
+            waitOnReachabilitySignal(RETRY_WAIT_MS);
         }
         return running.get();
     }
@@ -351,7 +412,7 @@ public final class TunnelService extends Service {
             return;
         }
         Log.w(TAG, statusName(profileIndex) + " reconnecting: " + reason);
-        setProfileStatus(profileIndex, STATUS_RETRYING);
+        markTunnelUnavailable();
         disconnect(profileIndex);
     }
 
@@ -508,6 +569,7 @@ public final class TunnelService extends Service {
                 + describeNetwork(manager, previousNetwork) + " to "
                 + describeNetwork(manager, nextNetwork)
                 + "; reconnecting SSH sessions");
+        markTunnelUnavailable();
         disconnectAll();
         signalReachabilityMonitor();
     }
@@ -528,32 +590,13 @@ public final class TunnelService extends Service {
                 .edit()
                 .putInt(KEY_VPS_REACHABILITY, state)
                 .apply();
-        if (running.get()) {
-            if (state == REACHABILITY_UNREACHABLE) {
-                updateAllProfileStatuses(STATUS_OFFLINE);
-            } else if (state == REACHABILITY_REACHABLE
-                    && previous != REACHABILITY_REACHABLE) {
-                updateAllProfileStatuses(STATUS_CONNECTING);
-            } else if (state == REACHABILITY_UNKNOWN) {
-                updateAllProfileStatuses(STATUS_CHECKING);
-            }
-            showForegroundNotification(notificationStatusText());
-        }
     }
 
-    private synchronized void updateAllProfileStatuses(String status) {
-        for (int i = 0; i < profiles.length; i++) {
-            statuses[i] = profileStatusText(i, status);
-        }
-        updateStatus(buildStatusSummary());
-    }
-
-    private synchronized void setProfileStatus(int profileIndex, String status) {
-        statuses[profileIndex] = profileStatusText(profileIndex, status);
-        String summary = buildStatusSummary();
-        updateStatus(summary);
+    private synchronized void updateConnectionStatus(String status, int dotState) {
+        setReachabilityState(dotState, false);
+        updateStatus(status);
         if (running.get()) {
-            showForegroundNotification(notificationStatusText());
+            showForegroundNotification(status);
         }
     }
 
@@ -578,30 +621,6 @@ public final class TunnelService extends Service {
             return;
         }
         startForeground(1, nextNotification);
-    }
-
-    private String buildStatusSummary() {
-        StringBuilder builder = new StringBuilder();
-        for (int i = 0; i < profiles.length; i++) {
-            if (i > 0) {
-                builder.append('\n');
-            }
-            builder.append(statuses[i] == null
-                    ? profileStatusText(i, STATUS_STOPPED)
-                    : statuses[i]);
-        }
-        return builder.toString();
-    }
-
-    private String notificationStatusText() {
-        return buildStatusSummary().replace('\n', ' ');
-    }
-
-    private String profileStatusText(int profileIndex, String status) {
-        if (profiles.length <= 1) {
-            return status;
-        }
-        return statusName(profileIndex) + ": " + status;
     }
 
     private String statusName(int profileIndex) {
@@ -763,12 +782,12 @@ public final class TunnelService extends Service {
             } catch (SocketException e) {
                 if (accepting.get() && running.get()) {
                     Log.w(TAG, profile.sshHost + " local listener stopped", e);
-                    setProfileStatus(profileIndex, STATUS_RETRYING);
+                    markTunnelUnavailable();
                 }
             } catch (IOException e) {
                 if (accepting.get() && running.get()) {
                     Log.w(TAG, profile.sshHost + " local listener failed", e);
-                    setProfileStatus(profileIndex, STATUS_RETRYING);
+                    markTunnelUnavailable();
                 }
             } finally {
                 accepting.set(false);
@@ -816,6 +835,18 @@ public final class TunnelService extends Service {
                 activeSockets.remove(socket);
                 activeConnections.decrementAndGet();
             }
+        }
+    }
+
+    private static final class DiagnosticResult {
+        final boolean vpsReachable;
+        final boolean yaReachable;
+        final boolean googleReachable;
+
+        DiagnosticResult(boolean vpsReachable, boolean yaReachable, boolean googleReachable) {
+            this.vpsReachable = vpsReachable;
+            this.yaReachable = yaReachable;
+            this.googleReachable = googleReachable;
         }
     }
 
