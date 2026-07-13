@@ -15,6 +15,7 @@ import android.net.NetworkRequest;
 import android.net.wifi.WifiManager;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.util.Log;
 import android.widget.RemoteViews;
 
@@ -43,6 +44,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public final class TunnelService extends Service {
     public static final String ACTION_START = "net.tref.xraytunnel.START";
@@ -57,10 +59,12 @@ public final class TunnelService extends Service {
 
     private static final String TAG = "XrayTunnel";
     private static final String CHANNEL_ID = "tunnel";
-    private static final int CHANNEL_CONNECT_TIMEOUT_MS = 1000;
+    private static final int CHANNEL_CONNECT_TIMEOUT_MS = 10000;
     private static final int VPS_PROBE_CONNECT_TIMEOUT_MS = 1000;
     private static final int INTERNET_PROBE_CONNECT_TIMEOUT_MS = 1000;
-    private static final long HEALTH_CHECK_INTERVAL_MS = 1000;
+    private static final long HEALTH_CHECK_INTERVAL_MS = 60000;
+    private static final long HEALTH_CHECK_LOOP_INTERVAL_MS = 2000;
+    private static final long FORWARD_HEALTH_STALE_MS = 90000;
     private static final long DIAGNOSTIC_PROBE_INTERVAL_MS = 1000;
     private static final long DIAGNOSTIC_PROBE_WAIT_MS = 1200;
     private static final long RETRY_WAIT_MS = 500;
@@ -86,6 +90,7 @@ public final class TunnelService extends Service {
     private final AtomicBoolean reachabilityMonitorRunning = new AtomicBoolean(false);
     private final AtomicBoolean tunnelOnline = new AtomicBoolean(false);
     private final AtomicBoolean vpsReachable = new AtomicBoolean(false);
+    private final AtomicLong lastSuccessfulForwardCheckMs = new AtomicLong(0);
     private final AtomicInteger reachabilityState =
             new AtomicInteger(TunnelSettings.REACHABILITY_UNKNOWN);
     private final Session[] sessions = new Session[TunnelConfig.PROFILE_COUNT];
@@ -196,8 +201,10 @@ public final class TunnelService extends Service {
                 config.put("StrictHostKeyChecking", profile.verifyHostKey ? "yes" : "no");
                 config.put("PreferredAuthentications", "publickey");
                 nextSession.setConfig(config);
-                nextSession.setServerAliveInterval(1000);
-                nextSession.setServerAliveCountMax(1);
+                // Permit short radio/Wi-Fi stalls while the device sleeps. The session
+                // is still actively checked below and immediately rebuilt on failures.
+                nextSession.setServerAliveInterval(30000);
+                nextSession.setServerAliveCountMax(3);
                 nextSession.connect(15000);
                 sessions[profileIndex] = nextSession;
 
@@ -208,9 +215,14 @@ public final class TunnelService extends Service {
                 verifyForwardChannel(profile, nextSession);
                 markTunnelOnline();
 
+                long nextHealthCheckAt = SystemClock.elapsedRealtime() + HEALTH_CHECK_INTERVAL_MS;
                 while (running.get() && nextSession.isConnected() && forwarder.isRunning()) {
-                    verifyForwardChannel(profile, nextSession);
-                    Thread.sleep(HEALTH_CHECK_INTERVAL_MS);
+                    Thread.sleep(HEALTH_CHECK_LOOP_INTERVAL_MS);
+                    if (SystemClock.elapsedRealtime() >= nextHealthCheckAt) {
+                        verifyForwardChannel(profile, nextSession);
+                        lastSuccessfulForwardCheckMs.set(SystemClock.elapsedRealtime());
+                        nextHealthCheckAt = SystemClock.elapsedRealtime() + HEALTH_CHECK_INTERVAL_MS;
+                    }
                 }
                 if (running.get()) {
                     markTunnelUnavailable();
@@ -254,6 +266,11 @@ public final class TunnelService extends Service {
         try {
             while (running.get()) {
                 if (tunnelOnline.get()) {
+                    if (isForwardHealthStale()) {
+                        Log.w(TAG, "SSH forward health check became stale; reconnecting tunnel");
+                        markTunnelUnavailable();
+                        disconnectAll();
+                    }
                     waitForNextReachabilityProbe(DIAGNOSTIC_PROBE_INTERVAL_MS);
                     continue;
                 }
@@ -339,6 +356,7 @@ public final class TunnelService extends Service {
     private void markTunnelOnline() {
         vpsReachable.set(true);
         tunnelOnline.set(true);
+        lastSuccessfulForwardCheckMs.set(SystemClock.elapsedRealtime());
         updateConnectionStatus(STATUS_ONLINE, REACHABILITY_REACHABLE);
         signalReachabilityMonitor();
     }
@@ -348,7 +366,15 @@ public final class TunnelService extends Service {
             return;
         }
         tunnelOnline.set(false);
+        lastSuccessfulForwardCheckMs.set(0);
+        updateConnectionStatus(STATUS_TUNNEL_DOWN, REACHABILITY_UNREACHABLE);
         signalReachabilityMonitor();
+    }
+
+    private boolean isForwardHealthStale() {
+        long lastCheckAt = lastSuccessfulForwardCheckMs.get();
+        return lastCheckAt == 0
+                || SystemClock.elapsedRealtime() - lastCheckAt > FORWARD_HEALTH_STALE_MS;
     }
 
     private boolean waitForReachableServer(int profileIndex) throws InterruptedException {
