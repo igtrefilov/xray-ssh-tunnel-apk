@@ -12,6 +12,9 @@ for 151.
 ## Runtime Behavior
 
 - `TunnelService` runs as a foreground service and keeps the SSH tunnel alive.
+- While the tunnel is online, VPS SSH reachability is checked every few seconds;
+  a failed check triggers parallel VPS and internet diagnostics before the status
+  is classified and the SSH session is rebuilt.
 - VPS reachability is probed with a fast TCP check against the SSH port; the UI
   and foreground notification show green/red status dots.
 - `BootReceiver` starts the service on `BOOT_COMPLETED` and after APK replacement.

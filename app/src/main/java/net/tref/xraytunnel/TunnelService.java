@@ -62,9 +62,10 @@ public final class TunnelService extends Service {
     private static final int CHANNEL_CONNECT_TIMEOUT_MS = 10000;
     private static final int VPS_PROBE_CONNECT_TIMEOUT_MS = 1000;
     private static final int INTERNET_PROBE_CONNECT_TIMEOUT_MS = 1000;
-    private static final long HEALTH_CHECK_INTERVAL_MS = 60000;
+    private static final long HEALTH_CHECK_INTERVAL_MS = 15000;
     private static final long HEALTH_CHECK_LOOP_INTERVAL_MS = 2000;
-    private static final long FORWARD_HEALTH_STALE_MS = 90000;
+    private static final long FORWARD_HEALTH_STALE_MS = 30000;
+    private static final long ONLINE_VPS_PROBE_INTERVAL_MS = 3000;
     private static final long DIAGNOSTIC_PROBE_INTERVAL_MS = 1000;
     private static final long DIAGNOSTIC_PROBE_WAIT_MS = 1200;
     private static final long RETRY_WAIT_MS = 500;
@@ -89,6 +90,7 @@ public final class TunnelService extends Service {
     private final AtomicBoolean foregroundStarted = new AtomicBoolean(false);
     private final AtomicBoolean reachabilityMonitorRunning = new AtomicBoolean(false);
     private final AtomicBoolean tunnelOnline = new AtomicBoolean(false);
+    private final AtomicBoolean tunnelConnecting = new AtomicBoolean(false);
     private final AtomicBoolean vpsReachable = new AtomicBoolean(false);
     private final AtomicLong lastSuccessfulForwardCheckMs = new AtomicLong(0);
     private final AtomicInteger reachabilityState =
@@ -160,6 +162,7 @@ public final class TunnelService extends Service {
     private void stopTunnel() {
         running.set(false);
         tunnelOnline.set(false);
+        tunnelConnecting.set(false);
         vpsReachable.set(false);
         signalReachabilityMonitor();
         unregisterNetworkCallback();
@@ -180,6 +183,7 @@ public final class TunnelService extends Service {
                 if (!waitForReachableServer(profileIndex)) {
                     continue;
                 }
+                tunnelConnecting.set(true);
                 JSch jsch = new JSch();
                 jsch.addIdentity(
                         profile.sshHost + "-bundled",
@@ -214,6 +218,7 @@ public final class TunnelService extends Service {
 
                 verifyForwardChannel(profile, nextSession);
                 markTunnelOnline();
+                tunnelConnecting.set(false);
 
                 long nextHealthCheckAt = SystemClock.elapsedRealtime() + HEALTH_CHECK_INTERVAL_MS;
                 while (running.get() && nextSession.isConnected() && forwarder.isRunning()) {
@@ -235,6 +240,7 @@ public final class TunnelService extends Service {
                 markTunnelUnavailable();
                 waitBeforeRetry();
             } finally {
+                tunnelConnecting.set(false);
                 disconnect(profileIndex);
             }
         }
@@ -270,7 +276,24 @@ public final class TunnelService extends Service {
                         Log.w(TAG, "SSH forward health check became stale; reconnecting tunnel");
                         markTunnelUnavailable();
                         disconnectAll();
+                    } else {
+                        TunnelProfile profile = profiles.length == 0 ? null : profiles[0];
+                        if (profile != null
+                                && !isReachable(
+                                        profile.sshHost,
+                                        profile.sshPort,
+                                        VPS_PROBE_CONNECT_TIMEOUT_MS)) {
+                            handleOnlineVpsProbeFailure(profile);
+                        }
                     }
+                    if (tunnelOnline.get()) {
+                        waitForNextReachabilityProbe(ONLINE_VPS_PROBE_INTERVAL_MS);
+                    } else {
+                        waitForNextReachabilityProbe(DIAGNOSTIC_PROBE_INTERVAL_MS);
+                    }
+                    continue;
+                }
+                if (tunnelConnecting.get()) {
                     waitForNextReachabilityProbe(DIAGNOSTIC_PROBE_INTERVAL_MS);
                     continue;
                 }
@@ -283,6 +306,21 @@ public final class TunnelService extends Service {
         } finally {
             reachabilityMonitorRunning.set(false);
         }
+    }
+
+    private void handleOnlineVpsProbeFailure(TunnelProfile profile) {
+        if (!running.get() || !tunnelOnline.get()) {
+            return;
+        }
+
+        Log.w(TAG, "VPS reachability probe failed while tunnel was online; diagnosing connection");
+        markTunnelUnavailable();
+        DiagnosticResult result = probeConnectivity(profile);
+        if (!running.get() || tunnelOnline.get()) {
+            return;
+        }
+        updateDiagnosticStatus(result);
+        disconnectAll();
     }
 
     private boolean isReachable(String host, int port, int timeoutMs) {
@@ -328,8 +366,8 @@ public final class TunnelService extends Service {
         return new DiagnosticResult(vps.get(), ya.get(), google.get());
     }
 
-    private void updateDiagnosticStatus(DiagnosticResult result) {
-        if (!running.get() || tunnelOnline.get()) {
+    private synchronized void updateDiagnosticStatus(DiagnosticResult result) {
+        if (!running.get() || tunnelOnline.get() || tunnelConnecting.get()) {
             return;
         }
         vpsReachable.set(result.vpsReachable);
@@ -356,6 +394,7 @@ public final class TunnelService extends Service {
     private void markTunnelOnline() {
         vpsReachable.set(true);
         tunnelOnline.set(true);
+        tunnelConnecting.set(false);
         lastSuccessfulForwardCheckMs.set(SystemClock.elapsedRealtime());
         updateConnectionStatus(STATUS_ONLINE, REACHABILITY_REACHABLE);
         signalReachabilityMonitor();
@@ -365,9 +404,11 @@ public final class TunnelService extends Service {
         if (!running.get()) {
             return;
         }
-        tunnelOnline.set(false);
+        boolean wasOnline = tunnelOnline.getAndSet(false);
         lastSuccessfulForwardCheckMs.set(0);
-        updateConnectionStatus(STATUS_TUNNEL_DOWN, REACHABILITY_UNREACHABLE);
+        if (wasOnline) {
+            updateConnectionStatus(STATUS_TUNNEL_DOWN, REACHABILITY_UNREACHABLE);
+        }
         signalReachabilityMonitor();
     }
 
